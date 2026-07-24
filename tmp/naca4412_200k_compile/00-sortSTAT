@@ -1,0 +1,68 @@
+# ! /bin/bash
+#--------------------------------------
+#A script for coping the sts file from the folder 
+#--------------------------------------
+
+#=======================
+# PARAM
+CASE_NAME="naca_wing"
+#Locate the PATH 
+DATA_PATH="../../../01-wing-sim/020-wing-sim-Ord7/03-results"
+# 
+TARGET_PATH='ZSTAT'
+# 
+DATA_TYPE='sts'
+#=======================
+
+# Parse arguments for commit message
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        --m) CASE_NAME="$2"; shift 2;; # Set commit message
+    
+        --p) DATA_PATH="$2"; shift 2;; # Set commit message
+        *) echo "CASE NAME To RUN: $1"; exit 1 ;;
+        # *) echo "CASE PATH To RUN: $2"; exit 1 ;;
+    esac
+done
+
+echo "CASE_NAME=$CASE_NAME DATA_PATH:=$DATA_PATH"
+
+fileNUM=$(ls $DATA_PATH/res_* -dq |  wc -l)
+echo "[FOLDER] ${fileNUM} FOLDERS"
+
+# Step2: A loop to accmulate the statistics data 
+NUM_TAR=0
+for i in `seq 1 $fileNUM`
+do
+    echo "[ITER] At FOLDER ${i}"
+    NUM_STS=$(ls $DATA_PATH/res_${i}/sts_data/${DATA_TYPE}${CASE_NAME}* -dq | wc -l)
+    echo "[FOLDER] ${NUM_STS} FILES in $DATA_PATH/res_${i}/sts_data/${DATA_TYPE}"
+	for j in `seq 1 $NUM_STS`
+	do
+		# Global number 
+        ((k=j+NUM_TAR))
+        
+        # Name the files 
+        id_padd1=$(printf "%05d" $j)
+        id_padd2=$(printf "%05d" $k)
+
+        fromData="$DATA_PATH/res_${i}/sts_data/${DATA_TYPE}${CASE_NAME}0.f${id_padd1}"
+        toData="$TARGET_PATH/${DATA_TYPE}${CASE_NAME}0.f${id_padd2}"
+        
+        # If it does not exist then copy that 
+        if [ -f "$toData" ]; then
+            echo "[DATA] ${toData} exists."
+        else
+            echo "[DATA] COPY from ${fromData}"
+            echo "[DATA] TARGET ${toData}."
+		    cp $fromData $toData
+        
+        fi
+
+	done
+    ((NUM_TAR=${NUM_TAR}+${NUM_STS}))
+    echo "[FOLDER] ${NUM_TAR} IN TARGET FODLER"
+    
+done
+
+# ((TOT_NUM=NUM_RUNS*NUM_STS))

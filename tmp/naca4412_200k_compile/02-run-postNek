@@ -1,0 +1,32 @@
+# !/bin/bash
+
+CASE_NAME="naca_wing"
+
+# Parse arguments for commit message
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        --m) CASE_NAME="$2"; shift ;; # Set commit message
+        *) echo "CASE NAME To RUN: $1"; exit 1 ;;
+    esac
+    shift
+done
+
+
+rm SESSION.NAME -f 
+echo "${CASE_NAME}" > SESSION.NAME
+pwd  >> SESSION.NAME
+
+rm logfile -f
+rm *.sch*
+
+echo "====================================="
+echo "           START: ${CASE_NAME}       "
+echo "====================================="
+
+mpirun -n 1 nek5000 > logfile 2>&1
+
+tail -n 100 logfile
+
+echo "============================"
+echo "        COMPLETE!           "
+echo "============================"

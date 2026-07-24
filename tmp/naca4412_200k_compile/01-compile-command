@@ -1,0 +1,15 @@
+# !/bin/bash
+
+CASE_NAME='naca_wing'
+
+# Parse arguments for commit message
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        --m) CASE_NAME="$2"; shift ;; # Set commit message
+        *) echo "CASE NAME To RUN: $1"; exit 1 ;;
+    esac
+    shift
+done
+
+./compile-script clean
+./compile-script ${CASE_NAME}

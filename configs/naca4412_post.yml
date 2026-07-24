@@ -1,0 +1,58 @@
+# Template for closing the Nek5000 -> int_fld -> Python post-processing loop.
+# Edit source.path before running on HPC.
+
+run:
+  name: naca_wing_XXX
+  root: runs
+
+case:
+  id: naca4412
+  session: naca_wing
+  dependencies: data/dependencies/naca4412
+  executable: data/dependencies/naca4412/nek5000_4412
+  stage_mode: copy
+  executable_stage_mode: copy
+  overwrite: true
+
+build:
+  enabled: false
+  archive: tmp/Nek1093_dong.tar.gz
+  source_dir: tmp/Nek1093_dong
+  work_dir: tmp/naca4412_200k_compile
+  template_dir: data/dependencies/naca4412
+  template_stage_mode: copy
+  template_overwrite: true
+  command: ./01-compile-command
+  env_script: ~/.bashrc.openmpi_ucx
+  executable_name: nek5000
+  output: data/dependencies/naca4412/nek5000_4412
+  logfile: build.log
+  skip_if_exists: true
+
+mesh:
+  mode: copy
+  source_dir: data/ZSTAT
+  stage_mode: copy
+  overwrite: true
+
+source:
+  path: /path/to/03-results
+  pattern: res_*/sts_data/stsnaca_wing0.f*
+  stage_mode: symlink
+  first_file: 1
+  last_file: auto
+  overwrite: true
+
+nek:
+  np: 1
+  mpirun: mpirun
+  executable_name: ./nek5000
+  logfile: logfile
+  sampling_start_time: 15.45
+
+post:
+  mesh: data/int_mesh.mat
+  out: stat_naca4412_200k.mat
+  istart: 25
+  iend: 80
+  long: 1

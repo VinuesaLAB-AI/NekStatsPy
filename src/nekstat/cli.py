@@ -1,4 +1,4 @@
-"""Command-line interface: ``nekstat <post|mesh|plot|validate>``."""
+"""Command-line interface: ``nekstat <build|run|post|mesh|plot|validate>``."""
 
 import os
 import argparse
@@ -53,6 +53,35 @@ def _cmd_validate(args):
     print("[validate] wrote:", *out, sep="\n  ")
 
 
+def _cmd_run(args):
+    from .nek5000 import run_from_config
+
+    paths = run_from_config(
+        args.config,
+        build=args.build,
+        rebuild=args.rebuild,
+        prepare_only=args.prepare_only,
+        skip_nek=args.skip_nek,
+        skip_post=args.skip_post,
+    )
+    print(f"[run] prepared {paths.root}")
+    print(f"      config: {paths.config}")
+    if paths.stat_file and not args.prepare_only and not args.skip_post:
+        print(f"      post:   {paths.stat_file}")
+    if not args.prepare_only and not args.skip_nek:
+        print(f"      log:    {paths.logfile}")
+
+
+def _cmd_build(args):
+    from .nek5000 import build_from_config
+
+    paths = build_from_config(args.config, rebuild=args.rebuild)
+    print(f"[build] source: {paths.source_dir}")
+    print(f"        work:   {paths.work_dir}")
+    print(f"        exe:    {paths.installed_executable}")
+    print(f"        log:    {paths.logfile}")
+
+
 def _default(name):
     try:
         from ._data import sample_paths
@@ -65,6 +94,26 @@ def main(argv=None):
     p = argparse.ArgumentParser(prog="nekstat",
                                 description="Nek5000 wing statistics post-processing")
     sub = p.add_subparsers(dest="cmd", required=True)
+
+    sb = sub.add_parser("build", help="extract solver archive and compile a case executable")
+    sb.add_argument("config", help="YAML run configuration")
+    sb.add_argument("--rebuild", action="store_true",
+                    help="compile even if the configured output executable exists")
+    sb.set_defaults(func=_cmd_build)
+
+    sr = sub.add_parser("run", help="prepare a Nek run folder and run configured stages")
+    sr.add_argument("config", help="YAML run configuration")
+    sr.add_argument("--build", action="store_true", default=None,
+                    help="build the configured Nek executable before staging the run")
+    sr.add_argument("--rebuild", action="store_true",
+                    help="force compilation when used with --build")
+    sr.add_argument("--prepare-only", action="store_true",
+                    help="stage the run folder, then stop")
+    sr.add_argument("--skip-nek", action="store_true",
+                    help="skip the Nek5000 interpolation stage")
+    sr.add_argument("--skip-post", action="store_true",
+                    help="skip Python int_fld post-processing")
+    sr.set_defaults(func=_cmd_run)
 
     sp = sub.add_parser("post", help="process int_fld -> stat .mat")
     sp.add_argument("--nek", default=_default("nek_dir"),
