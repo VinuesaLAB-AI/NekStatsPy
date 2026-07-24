@@ -1,0 +1,5 @@
+include README.md LICENSE
+recursive-include src/nekstat *.py py.typed
+# Sample data lives in the repo (data/) but is intentionally NOT bundled into the
+# wheel/sdist to keep the package light. Fetch it from the Git repository.
+prune data
