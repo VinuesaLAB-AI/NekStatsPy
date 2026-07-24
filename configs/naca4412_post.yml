@@ -39,6 +39,7 @@ source:
   path: /path/to/03-results
   pattern: res_*/sts_data/stsnaca_wing0.f*
   stage_mode: symlink
+  # Select a 1-based window from the numerically sorted matched sts files.
   first_file: 1
   last_file: auto
   overwrite: true
@@ -48,7 +49,19 @@ nek:
   mpirun: mpirun
   executable_name: ./nek5000
   logfile: logfile
-  sampling_start_time: 15.45
+  sampling_start_time: auto
+  # Required when source.first_file is 1 and no predecessor sts file exists.
+  initial_start_time:
+  # Set true only if p070 should equal the first selected sts header end time.
+  allow_first_file_end_time_as_start: false
+  output_dir: A0
+  clear_a0: true
+  clear_sch: true
+  remove_existing_int_fld: true
+  remove_logfile: true
+  require_int_fld: true
+  completion_marker: Output interporlated field in int_fld
+  abort_marker: "ABORT:"
 
 post:
   mesh: data/int_mesh.mat

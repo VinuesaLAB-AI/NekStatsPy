@@ -9,6 +9,15 @@ dist/
 outputs/
 figs/
 validation_figs/
+runs/*
+!runs/.gitkeep
+tmp/Nek1093_dong/
+tmp/naca4412_200k_compile/obj/
+tmp/naca4412_200k_compile/nek5000
+tmp/naca4412_200k_compile/build.log
+tmp/naca4412_200k_compile/compiler.out
+tmp/channel_post_example.tar.gz
+tmp/naca0012_stat_dep.tar.gz
 *.mat.bak
 .venv/
 env/

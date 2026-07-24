@@ -9,6 +9,7 @@ post-processing case that converts ordered ``sts`` files plus ``x.fort`` /
 from __future__ import annotations
 
 import glob
+import math
 import os
 import re
 import shlex
@@ -27,11 +28,13 @@ from .pipeline import run as run_post
 __all__ = [
     "BuildPaths",
     "RunPaths",
+    "StsFile",
     "build_from_config",
     "build_solver",
     "load_config",
     "prepare_run",
     "patch_rea_params",
+    "read_sts_header",
     "run_nek",
     "run_from_config",
     "stage_stats_files",
@@ -63,6 +66,18 @@ class BuildPaths:
     executable: Path
     installed_executable: Path
     logfile: Path
+
+
+@dataclass(frozen=True)
+class StsFile:
+    """One source ``sts`` file staged into the run-local ``ZSTAT`` directory."""
+
+    index: int
+    source: Path
+    staged: Path
+    end_time: float
+    header: str
+    predecessor_end_time: Optional[float]
 
 
 def load_config(path: Pathish) -> Dict[str, Any]:
@@ -207,6 +222,7 @@ def prepare_run(conf: Mapping[str, Any], *, base_dir: Optional[Path] = None) -> 
 
     run_dir.mkdir(parents=True, exist_ok=True)
     zstat_dir.mkdir(parents=True, exist_ok=True)
+    _runtime_output_dir(conf, run_dir).mkdir(parents=True, exist_ok=True)
 
     deps_dir = _resolve_path(
         case_conf.get("dependencies", f"data/dependencies/{case_id}"),
@@ -241,7 +257,7 @@ def stage_stats_files(
     session: str,
     base_dir: Optional[Path] = None,
     repo_root: Optional[Path] = None,
-) -> List[Path]:
+) -> List[StsFile]:
     """Discover, numerically sort, and stage ``sts`` files into ``ZSTAT``."""
 
     source_conf = _section(conf, "source")
@@ -256,27 +272,63 @@ def stage_stats_files(
     stage_mode = str(source_conf.get("stage_mode", "symlink")).lower()
     first_index = int(source_conf.get("first_file", 1))
     last_index = source_conf.get("last_file", "auto")
+    if first_index < 1:
+        raise ValueError("source.first_file must be >= 1")
 
     files = _discover_stats(source_root, pattern)
+    if first_index > len(files):
+        raise FileNotFoundError(
+            f"source.first_file={first_index} exceeds the {len(files)} matched "
+            f"stats file(s) from {source_root / pattern}"
+        )
     if last_index not in (None, "", "auto"):
-        n_keep = int(last_index) - first_index + 1
-        if n_keep < 0:
+        last_index = int(last_index)
+        if last_index < first_index:
             raise ValueError("source.last_file must be >= source.first_file")
-        files = files[:n_keep]
+        if last_index > len(files):
+            raise FileNotFoundError(
+                f"source.last_file={last_index} exceeds the {len(files)} matched "
+                f"stats file(s) from {source_root / pattern}"
+            )
+        selected = files[first_index - 1:last_index]
+    else:
+        selected = files[first_index - 1:]
 
-    if not files:
+    if not selected:
         raise FileNotFoundError(
             f"No stats files matched {source_root / pattern}. "
             "Set source.path/source.pattern, or omit source.path for prepare-only runs."
         )
 
-    staged: List[Path] = []
+    staged: List[StsFile] = []
     prefix = str(source_conf.get("target_prefix") or f"sts{session}0.f")
     overwrite = bool(source_conf.get("overwrite", False))
-    for offset, src in enumerate(files, start=first_index):
-        dst = zstat_dir / f"{prefix}{offset:05d}"
+    previous_end_time = (
+        read_sts_header(files[first_index - 2])[1]
+        if first_index > 1
+        else None
+    )
+    for src_pos, src in enumerate(selected, start=first_index):
+        header, end_time = read_sts_header(src)
+        if previous_end_time is not None and end_time <= previous_end_time:
+            raise ValueError(
+                "sts end times are not strictly increasing: "
+                f"file {src_pos - 1} ends at {previous_end_time:.16g}, "
+                f"file {src_pos} at {end_time:.16g}"
+            )
+        dst = zstat_dir / f"{prefix}{src_pos:05d}"
         _stage_file(src, dst, mode=stage_mode, overwrite=overwrite)
-        staged.append(dst)
+        staged.append(
+            StsFile(
+                index=src_pos,
+                source=src,
+                staged=dst,
+                end_time=end_time,
+                header=header,
+                predecessor_end_time=previous_end_time,
+            )
+        )
+        previous_end_time = end_time
     return staged
 
 
@@ -284,10 +336,14 @@ def run_nek(conf: Mapping[str, Any], paths: RunPaths) -> None:
     """Run the staged Nek5000 executable inside the run directory."""
 
     nek_conf = _section(conf, "nek")
+    session = _required_str(_section(conf, "case"), "session", "case")
+    _write_session(paths.root, session)
+    _prepare_nek_run_state(nek_conf, paths)
+
     np = int(nek_conf.get("np", 1))
     executable = str(nek_conf.get("executable_name", "./nek5000"))
     mpirun = str(nek_conf.get("mpirun", "mpirun"))
-    cmd = [mpirun, "-n", str(np), executable]
+    cmd = _build_command([mpirun, "-n", str(np), executable], nek_conf.get("env_script"))
     env = os.environ.copy()
     env.update({str(k): str(v) for k, v in _section(nek_conf, "env").items()})
 
@@ -304,6 +360,7 @@ def run_nek(conf: Mapping[str, Any], paths: RunPaths) -> None:
         raise RuntimeError(
             f"Nek5000 failed with exit code {proc.returncode}; see {paths.logfile}"
         )
+    _validate_nek_run(nek_conf, paths)
 
 
 def run_python_post(conf: Mapping[str, Any], paths: RunPaths):
@@ -325,6 +382,41 @@ def run_python_post(conf: Mapping[str, Any], paths: RunPaths):
         iend=int(post_conf.get("iend", 80)),
         long=int(post_conf.get("long", 1)),
     )
+
+
+def _prepare_nek_run_state(nek_conf: Mapping[str, Any], paths: RunPaths) -> None:
+    paths.zstat.mkdir(parents=True, exist_ok=True)
+    a0_dir = _runtime_output_dir_from_nek(nek_conf, paths.root)
+    a0_dir.mkdir(parents=True, exist_ok=True)
+
+    if bool(nek_conf.get("clear_a0", True)):
+        _clear_generated_entries(a0_dir)
+    if bool(nek_conf.get("remove_existing_int_fld", True)):
+        _safe_unlink(paths.zstat / "int_fld")
+    if bool(nek_conf.get("clear_sch", True)):
+        for entry in paths.root.glob("*.sch*"):
+            _safe_unlink(entry)
+    if bool(nek_conf.get("remove_logfile", True)):
+        _safe_unlink(paths.logfile)
+
+
+def _validate_nek_run(nek_conf: Mapping[str, Any], paths: RunPaths) -> None:
+    log_text = ""
+    if paths.logfile.exists():
+        log_text = paths.logfile.read_text(encoding="utf-8", errors="replace")
+
+    abort_marker = nek_conf.get("abort_marker", "ABORT:")
+    if abort_marker and abort_marker in log_text:
+        raise RuntimeError(f"Nek5000 reported {abort_marker!r}; see {paths.logfile}")
+
+    marker = nek_conf.get("completion_marker", "Output interporlated field in int_fld")
+    if marker and marker not in log_text:
+        raise RuntimeError(
+            f"Nek5000 log is missing completion marker {marker!r}; see {paths.logfile}"
+        )
+
+    if bool(nek_conf.get("require_int_fld", True)) and not (paths.zstat / "int_fld").is_file():
+        raise RuntimeError(f"Nek5000 did not create {paths.zstat / 'int_fld'}")
 
 
 def _stage_case_files(
@@ -361,6 +453,26 @@ def _stage_case_files(
         dst.chmod(dst.stat().st_mode | 0o111)
     except FileNotFoundError:
         pass
+
+
+def _runtime_output_dir(conf: Mapping[str, Any], run_dir: Path) -> Path:
+    return _runtime_output_dir_from_nek(_section(conf, "nek"), run_dir)
+
+
+def _runtime_output_dir_from_nek(nek_conf: Mapping[str, Any], run_dir: Path) -> Path:
+    return _resolve_under(nek_conf.get("output_dir", "A0"), run_dir)
+
+
+def _clear_generated_entries(directory: Path) -> None:
+    for entry in directory.iterdir():
+        _safe_unlink(entry)
+
+
+def _safe_unlink(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.exists():
+        raise ValueError(f"Refusing to remove directory or special file: {path}")
 
 
 def _stage_build_template(
@@ -430,22 +542,19 @@ def _patch_rea_if_present(
     conf: Mapping[str, Any],
     run_dir: Path,
     session: str,
-    staged_stats: Sequence[Path],
+    staged_stats: Sequence[StsFile],
 ) -> None:
     nek_conf = _section(conf, "nek")
     params: Dict[int, Any] = {}
     if staged_stats:
-        source_conf = _section(conf, "source")
-        first_file = int(source_conf.get("first_file", 1))
-        last_file = source_conf.get("last_file", "auto")
-        params[68] = (
-            first_file + len(staged_stats) - 1
-            if last_file in (None, "", "auto")
-            else int(last_file)
+        params[68] = staged_stats[-1].index
+        params[69] = staged_stats[0].index
+        params[70] = _sampling_start_time(nek_conf, staged_stats)
+    elif nek_conf.get("sampling_start_time") not in (None, "", "auto"):
+        params[70] = _coerce_float(
+            nek_conf["sampling_start_time"],
+            "nek.sampling_start_time",
         )
-        params[69] = first_file
-    if "sampling_start_time" in nek_conf:
-        params[70] = nek_conf["sampling_start_time"]
     params.update({int(k): v for k, v in _section(nek_conf, "rea_params").items()})
 
     if not params:
@@ -488,6 +597,34 @@ def patch_rea_params(path: Pathish, params: Mapping[int, Any]) -> None:
     path.write_text("".join(patched), encoding="utf-8")
 
 
+def read_sts_header(path: Pathish) -> Tuple[str, float]:
+    """Return ``(header_text, end_time)`` from a Nek ``sts`` file header."""
+
+    path = Path(path)
+    try:
+        payload = path.read_bytes()[:136]
+    except OSError as exc:
+        raise ValueError(f"{path}: cannot read sts header ({exc})") from exc
+
+    failures: List[str] = []
+    for offset in (0, 4):
+        candidate = payload[offset:offset + 132]
+        if len(candidate) < 8:
+            failures.append(f"offset {offset}: truncated header")
+            continue
+        try:
+            header = candidate.decode("ascii", errors="strict").strip()
+            fields = header.split()
+            if not fields or fields[0] != "#std" or len(fields) < 8:
+                raise ValueError(f"unexpected header {header!r}")
+            end_time = _coerce_float(fields[7], f"{path}: sts header end time")
+            return header, end_time
+        except (UnicodeDecodeError, ValueError) as exc:
+            failures.append(f"offset {offset}: {exc}")
+
+    raise ValueError(f"{path}: cannot parse sts header ({'; '.join(failures)})")
+
+
 def _discover_stats(source_root: Path, pattern: str) -> List[Path]:
     if source_root.is_file():
         files = [source_root]
@@ -496,6 +633,33 @@ def _discover_stats(source_root: Path, pattern: str) -> List[Path]:
     files = [p for p in files if p.is_file()]
     files.sort(key=_natural_key)
     return files
+
+
+def _sampling_start_time(
+    nek_conf: Mapping[str, Any],
+    staged_stats: Sequence[StsFile],
+) -> float:
+    raw = nek_conf.get("sampling_start_time", "auto")
+    if raw not in (None, "", "auto"):
+        return _coerce_float(raw, "nek.sampling_start_time")
+
+    predecessor = staged_stats[0].predecessor_end_time
+    if predecessor is not None:
+        return predecessor
+
+    initial = nek_conf.get("initial_start_time")
+    if initial not in (None, ""):
+        return _coerce_float(initial, "nek.initial_start_time")
+
+    if bool(nek_conf.get("allow_first_file_end_time_as_start", False)):
+        return staged_stats[0].end_time
+
+    raise ValueError(
+        "Cannot infer nek.sampling_start_time=auto for first_file=1 because no "
+        "predecessor sts file is available. Set nek.initial_start_time, start "
+        "from source.first_file > 1, or explicitly enable "
+        "nek.allow_first_file_end_time_as_start."
+    )
 
 
 def _extract_solver_archive(archive: Path, target_dir: Path) -> None:
@@ -579,6 +743,16 @@ def _format_rea_value(value: Any) -> str:
         return f"{float(text):.12E}"
     except ValueError:
         return text
+
+
+def _coerce_float(value: Any, label: str) -> float:
+    try:
+        result = float(str(value).replace("D", "E").replace("d", "e"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be a finite float, got {value!r}") from exc
+    if not math.isfinite(result):
+        raise ValueError(f"{label} must be finite, got {value!r}")
+    return result
 
 
 def _natural_key(path: Path) -> Tuple[Any, ...]:

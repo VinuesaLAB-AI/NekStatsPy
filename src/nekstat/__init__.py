@@ -25,10 +25,12 @@ from ._data import data_path, sample_paths
 from .nek5000 import (
     BuildPaths,
     RunPaths,
+    StsFile,
     build_from_config,
     build_solver,
     load_config,
     prepare_run,
+    read_sts_header,
     run_from_config,
 )
 
@@ -39,8 +41,9 @@ __all__ = [
     "read_data_profiles", "load_prof_data",
     "export_drag_decomposition", "save_Re200k",
     "build_mesh", "save_inter_mesh",
-    "BuildPaths", "RunPaths", "build_from_config", "build_solver",
-    "load_config", "prepare_run", "run_from_config",
+    "BuildPaths", "RunPaths", "StsFile",
+    "build_from_config", "build_solver",
+    "load_config", "prepare_run", "read_sts_header", "run_from_config",
     "data_path", "sample_paths", "viz",
 ]
 
