@@ -8,6 +8,7 @@ dist/
 .ipynb_checkpoints/
 outputs/
 figs/
+Figs/
 validation_figs/
 runs/*
 !runs/.gitkeep
@@ -16,6 +17,16 @@ tmp/naca4412_200k_compile/obj/
 tmp/naca4412_200k_compile/nek5000
 tmp/naca4412_200k_compile/build.log
 tmp/naca4412_200k_compile/compiler.out
+tmp/0012_gen_meshes/
+tmp/00_GenProfile/
+tmp/KTH_Framework/
+tmp/no_resize_lc/
+tmp/no_resize_lc_compile/
+tmp/result_data/
+tmp/naca0012_200k_compile/
+tmp/naca0012_genMesh.tar.gz
+tmp/naca0012_meshes.tar.gz
+tmp/nek1072/
 tmp/channel_post_example.tar.gz
 tmp/naca0012_stat_dep.tar.gz
 *.mat.bak

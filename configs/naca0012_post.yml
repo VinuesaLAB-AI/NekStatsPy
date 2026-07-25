@@ -1,0 +1,100 @@
+# Template for NACA0012 Re=200k, AoA=0 deg post-processing.
+# Edit source.path before running on HPC.
+
+run:
+  name: naca0012_wing_XXX
+  root: runs
+
+case:
+  id: naca0012
+  session: naca_wing
+  dependencies: data/dependencies/naca0012
+  executable: data/dependencies/naca0012/nek5000_0012
+  stage_mode: copy
+  executable_stage_mode: copy
+  overwrite: true
+
+build:
+  enabled: false
+  archive: tmp/nek1072.tar.gz
+  source_dir: tmp/nek1072
+  work_dir: tmp/naca0012_200k_compile
+  template_dir: data/dependencies/naca0012
+  template_files:
+    - SIZE
+    - makefile_usr.inc
+    - naca_wing.usr
+    - naca_wing.rea
+    - naca_wing.re2
+    - naca_wing.map
+    - makenek
+    - compile.sh
+    - 01-compile-command
+    - misc_outgrid.f
+    - misc.f
+  template_stage_mode: copy
+  template_overwrite: true
+  command: ./01-compile-command
+  env_script: ~/.bashrc.openmpi_ucx
+  # Optional override when the Nek1072 source is not at ../nek1072/trunk/nek
+  # relative to build.work_dir.
+  env:
+    NEK_SOURCE_ROOT: ../nek1072/trunk/nek
+  executable_name: nek5000
+  output: data/dependencies/naca0012/nek5000_0012
+  logfile: build.log
+  skip_if_exists: true
+
+mesh:
+  mode: copy
+  source_dir: data/meshes/naca0012/ZSTAT
+  stage_mode: copy
+  overwrite: true
+
+source:
+  path: /path/to/naca0012/03-results
+  pattern: res_*/sts_data/stsnaca_wing0.f*
+  stage_mode: symlink
+  # Select a 1-based window from the numerically sorted matched sts files.
+  # The archived NACA0012 run used files 1..107.
+  first_file: 1
+  last_file: auto
+  overwrite: true
+
+nek:
+  np: 1
+  mpirun: mpirun
+  executable_name: ./nek5000
+  logfile: logfile
+  sampling_start_time: auto
+  # Archived NACA0012 run p070. If first_file > 1, auto uses the predecessor
+  # sts header instead; if your first_file=1 starts at another time, update this.
+  initial_start_time: 7.000000000028
+  allow_first_file_end_time_as_start: false
+  output_dir: A0
+  clear_a0: true
+  clear_sch: true
+  remove_existing_int_fld: true
+  remove_logfile: true
+  require_int_fld: true
+  completion_marker: Output interporlated field in int_fld
+  abort_marker: "ABORT:"
+
+post:
+  mesh: data/meshes/naca0012/int_mesh.mat
+  out: stat_naca0012_200k.mat
+  istart: 25
+  iend: 80
+  long: 1
+  aoa_deg: 0.0
+
+clcd_backward:
+  output_dir: runs/naca0012_wing_clcd_backward
+  first_file: 1
+  last_file: auto
+  stride: 5
+  # Uses the archived run start time when the backward sweep includes file 1.
+  initial_start_time: 7.000000000028
+  aoa_deg: 0.0
+  force: false
+  discard_int_fld: false

@@ -69,3 +69,16 @@ post:
   istart: 25
   iend: 80
   long: 1
+  aoa_deg: 5.0
+
+clcd_backward:
+  # Python-only fixed-end convergence sweep. This command uses the shared
+  # case/build/mesh/source/nek sections, then overrides the source window below.
+  output_dir: runs/naca_wing_clcd_backward
+  # Set this to 1 only when nek.initial_start_time is provided.
+  first_file: 2
+  last_file: auto
+  stride: 5
+  aoa_deg: 5.0
+  force: false
+  discard_int_fld: false

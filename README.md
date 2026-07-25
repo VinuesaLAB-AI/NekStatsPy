@@ -1,7 +1,10 @@
 # nekstat
 
-Post-processing of **Nek5000 on-the-fly wing statistics** for a NACA-4412
-turbulent boundary layer (Re<sub>c</sub> = 200 000, AoA = 5°). It reads the
+Post-processing of **Nek5000 on-the-fly wing statistics** for NACA airfoil
+turbulent boundary-layer cases. The bundled production templates cover
+NACA-4412 at Re<sub>c</sub> = 200 000, AoA = 5°, and NACA-0012 at
+Re<sub>c</sub> = 200 000, AoA = 0°. A parallel KTH Framework/PSTAT2D workflow
+covers the `no_resize_lc` channel-flow case at Reb = 4600. The airfoil pipeline reads the
 interpolated statistics field `ZSTAT/int_fld`, rotates every quantity into the
 wall-tangent / wall-normal frame, and produces boundary-layer profiles, integral
 quantities, the full Reynolds-stress / turbulent-kinetic-energy budget, and the
@@ -52,15 +55,30 @@ examples, or point the tools at your own Nek output.
 # close the loop from ordered Nek sts files -> int_fld -> stat .mat
 # edit source.path in the config first
 nekstat run configs/naca4412_post.yml
+nekstat run configs/naca0012_post.yml
+
+# run fixed-end backward windows and write a Python-only Cl/Cd convergence CSV
+nekstat clcd-backward configs/naca4412_post.yml
+nekstat clcd-backward configs/naca0012_post.yml
 
 # stage a run folder without launching Nek or Python post-processing
 nekstat run configs/naca4412_post.yml --prepare-only
 
+# stage the backward Cl/Cd run folder and write the planned window manifest
+nekstat clcd-backward configs/naca4412_post.yml --prepare-only
+
 # rebuild the case executable with the local MPI/compiler environment
 nekstat build configs/naca4412_post.yml --rebuild
+nekstat build configs/naca0012_post.yml --rebuild
+nekstat build configs/channel_lc_post.yml --rebuild
 
 # rebuild first, then stage/run/post from the same config
 nekstat run configs/naca4412_post.yml --build --rebuild
+
+# KTH PSTAT2D channel workflow
+nekstat run configs/channel_lc_post.yml
+nekstat channel-post configs/channel_lc_post.yml --int-fld tmp/no_resize_lc/int_fld --out tmp/result_data/channel_python.mat --no-figures
+nekstat validate-channel --mine channel_python.mat --ref matlab_reference.mat
 
 # process int_fld -> stat .mat   (defaults to the bundled sample case)
 nekstat post --nek data --mesh data/int_mesh.mat --out stat.mat
@@ -144,12 +162,17 @@ nekstat/
 │   ├── naca_geom.py     naca_prof2 / create_profiles / rot / save_inter_mesh
 │   ├── pipeline.py      high-level run() / process()
 │   ├── nek5000.py       config -> runs/<name> staging + Nek launch + post hook
+│   ├── clcd_backward.py fixed-end backward Cl/Cd convergence sweeps
+│   ├── kth_channel.py   KTH Framework/PSTAT2D channel staging + run hook
+│   ├── channel_intfld.py/channel_pipeline.py
+│   │                    KTH int_fld reader + MATLAB-free channel post
 │   ├── result.py        Result accessor
 │   ├── cli.py           `nekstat` command
 │   └── viz/             velocity / budget / streamwise plots (single + overlay)
 ├── data/                sample case: ZSTAT/int_fld, x.fort, y.fort, int_mesh.mat,
 │                        reference/stat_benchmark_N11_naca4412_200k.mat,
-│                        dependencies/naca4412 reusable Nek case assets
+│                        dependencies/<case> reusable Nek case assets,
+│                        meshes/naca0012 copy-mode interpolation mesh
 ├── runs/                generated run workspaces (ignored by git)
 ├── examples/run_pipeline.py
 └── docs/                figures for this README
@@ -189,7 +212,15 @@ file behavior is intended. The run launcher also creates the Nek output
 directory `A0`, clears stale `A0` field files, removes old `ZSTAT/int_fld` and
 `*.sch*` files, and checks the Nek log for the configured completion marker.
 
-The NACA-4412 template is `configs/naca4412_post.yml`. The main fields are:
+The ready templates are:
+
+| config | case | Nek source | mesh |
+|---|---|---|---|
+| `configs/naca4412_post.yml` | NACA4412, Re=200k, AoA=5 deg | `tmp/Nek1093_dong.tar.gz` | `data/ZSTAT`, `data/int_mesh.mat` |
+| `configs/naca0012_post.yml` | NACA0012, Re=200k, AoA=0 deg | `tmp/nek1072.tar.gz` | `data/meshes/naca0012/` |
+| `configs/channel_lc_post.yml` | channel `no_resize_lc`, Reb=4600 | `tmp/KTH_Framework.tar.gz` | `DATA/int_pos`, `DATA/c2Dtcf0.f00001` |
+
+The main config fields are:
 
 | section | purpose |
 |---|---|
@@ -200,9 +231,78 @@ The NACA-4412 template is `configs/naca4412_post.yml`. The main fields are:
 | `source` | source result tree, glob, and 1-based window over sorted `sts*` files |
 | `nek` | MPI launch settings and `.rea` parameter overrides |
 | `post` | existing Python `int_fld -> stat_*.mat` options |
+| `clcd_backward` | Python-only fixed-end Cl/Cd convergence sweep options |
+| `pstat2d` / `channel_post` | KTH PSTAT2D `tcf.par` patching and channel `.mat` export |
 
 Use `--prepare-only` to stage and inspect the folder on a login node. Use
 `--skip-nek` or `--skip-post` when one stage has already been completed.
+
+For the NACA0012 template, the archived run used `source.first_file: 1` and
+`nek.initial_start_time: 7.000000000028`. If you start from a later sorted
+`sts` file, keep `nek.sampling_start_time: auto` and the launcher will read the
+predecessor header. If your first selected file is still file 1 but begins at a
+different physical time, update `nek.initial_start_time` in the config.
+
+### Backward Cl/Cd convergence
+
+`nekstat clcd-backward <config.yml>` uses the shared `case`, `build`, `mesh`,
+`source`, and `nek` sections, then reads `clcd_backward` for the sweep-specific
+window and output settings. The ordinary `nekstat run` command continues to use
+the `post` section for the full `int_fld -> stat_*.mat` export.
+
+The backward workflow keeps the final selected `sts` file fixed and advances the
+first included file by `clcd_backward.stride`. For a sweep with
+`first_file: 100`, `last_file: 199`, and `stride: 5`, the Nek parameters are
+patched as windows `100-199`, `105-199`, `110-199`, and so on. For every window,
+`p070` is inferred from the predecessor `sts` header, matching the single-run
+`sampling_start_time: auto` behavior.
+
+The run folder contains:
+
+```text
+runs/naca_wing_clcd_backward/
+├── clcd_backward.csv       # Cl, Cd, Cd_p, Cd_f, L/D, and timing metadata
+├── nek_windows.csv         # planned/generated/reused Nek windows
+├── int_fld/                # per-window int_fld snapshots
+├── logs/                   # per-window Nek logs
+├── ZSTAT/                  # staged sts files and transient int_fld
+└── A0/                     # transient Nek output directory
+```
+
+Existing valid per-window `int_fld` files are reused unless `--force` or
+`clcd_backward.force: true` is set. `--skip-nek` recomputes the CSV from existing
+`int_fld` snapshots. `--discard-int-fld` removes those snapshots after the CSV is
+written. The coefficient extraction is pure Python and reads only the records
+needed for Cl/Cd: `F4` and `D1-D4`.
+
+### KTH channel workflow
+
+`workflow: channel2d` selects the KTH Framework/PSTAT2D path. It stages the
+`tcf` case assets, `DATA/int_pos`, `DATA/c2Dtcf0.f00001`, and selected source
+`ststcf0.f*` files. Because this KTH case ignores `STS_FFILE`, selected source
+files are renumbered into `DATA/ststcf0.f00001...`, and `_PSTAT2D:STS_NFILE`
+plus `_PSTAT2D:STS_STIME` are patched in `tcf.par`.
+
+The MATLAB `post_STAT.m` step is replaced by `nekstat channel-post`, which reads
+the KTH `int_fld` format directly, computes the same channel profile fields and
+wall units, writes a MATLAB `data` struct, and can regenerate the same figure
+set. `validate-channel` reports max absolute differences against a MATLAB
+reference `.mat` when MATLAB is available on HPC.
+
+Fresh channel parity check against MATLAB `post_STAT.m` output, focused on the
+wall-unit velocity and Reynolds-stress profiles used for the channel case:
+
+| field | max &#124;Python − MATLAB&#124; |
+|---|---:|
+| `Up` | 1.421e-14 |
+| `uup` | 7.105e-15 |
+| `uvp` | 5.551e-16 |
+| `vvp` | 8.882e-16 |
+| `wwp` | 1.554e-15 |
+
+![Channel U+ MATLAB vs Python](docs/channel_uplus_comparison.png)
+
+![Channel Reynolds-stress MATLAB vs Python](docs/channel_reynolds_stress_comparison.png)
 
 ## Mesh generation
 
@@ -211,6 +311,12 @@ interpolation mesh (83 chordwise stations × 190 wall-normal points) and write t
 little-endian Fortran-record `x.fort` / `y.fort` that Nek5000 reads. The committed
 mesh uses leading-edge clustering to `x/c = 0.295` with uniform spacing
 `dx = 0.01625` thereafter.
+
+The NACA0012 workflow currently uses the supplied mesh files in
+`data/meshes/naca0012/`: `ZSTAT/x.fort`, `ZSTAT/y.fort`, and `int_mesh.mat`.
+That mesh has 80 profiles per side, 857 wall-normal points, and 137120 total
+interpolation points. The symmetric-airfoil generated-mesh path is tracked in
+`docs/naca0012_re200k_open_issue.md`.
 
 ## Relation to the original MATLAB code
 

@@ -5,12 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "nekstat"
 version = "0.1.0"
-description = "Post-processing of Nek5000 on-the-fly wing statistics (NACA-4412 TBL): read interpolated int_fld, rotate to the wall frame, compute BL integral quantities, Reynolds-stress budgets and Cl/Cd."
+description = "Post-processing workflows for Nek5000 statistics: NACA airfoil boundary layers and KTH PSTAT2D channel flow."
 readme = "README.md"
 requires-python = ">=3.8"
 license = { text = "MIT" }
 authors = [{ name = "Yuning Wang" }]
-keywords = ["Nek5000", "CFD", "turbulence", "boundary-layer", "NACA4412",
+keywords = ["Nek5000", "CFD", "turbulence", "boundary-layer", "channel-flow", "NACA4412",
             "post-processing", "spectral-element"]
 classifiers = [
     "Programming Language :: Python :: 3",

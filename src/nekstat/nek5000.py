@@ -55,6 +55,7 @@ class RunPaths:
     config: Path
     logfile: Path
     stat_file: Optional[Path]
+    staged_stats: Tuple[StsFile, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -246,6 +247,7 @@ def prepare_run(conf: Mapping[str, Any], *, base_dir: Optional[Path] = None) -> 
         config=run_dir / "current_conf.yml",
         logfile=run_dir / str(_section(conf, "nek").get("logfile", "logfile")),
         stat_file=stat_file,
+        staged_stats=tuple(staged_stats),
     )
     _write_resolved_config(conf, paths.config)
     return paths
@@ -381,6 +383,7 @@ def run_python_post(conf: Mapping[str, Any], paths: RunPaths):
         istart=int(post_conf.get("istart", 25)),
         iend=int(post_conf.get("iend", 80)),
         long=int(post_conf.get("long", 1)),
+        aoa_deg=float(post_conf.get("aoa_deg", 5.0)),
     )
 
 

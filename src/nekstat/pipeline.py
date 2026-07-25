@@ -19,7 +19,7 @@ def load_mesh(mesh_file):
     return sio.loadmat(mesh_file)
 
 
-def process(nek_dir, mesh_file, istart=25, iend=80, long=1):
+def process(nek_dir, mesh_file, istart=25, iend=80, long=1, aoa_deg=5.0):
     """Read + rotate + integrate; return (top_ref, bot_ref) export lists.
 
     Parameters
@@ -28,18 +28,19 @@ def process(nek_dir, mesh_file, istart=25, iend=80, long=1):
     mesh_file : str path to int_mesh.mat.
     istart, iend : int  MATLAB 1-based profile window to export (default 25..80).
     long : int      1 -> also compute the turbulent-budget tensors.
+    aoa_deg : float angle of attack used to resolve lift and drag.
     """
     mesh = load_mesh(mesh_file)
     top, bottom = read_data_profiles(nek_dir, mesh, long=long)
-    top, bot = load_prof_data(top, bottom, istart, iend, budget_flag=long)
+    top, bot = load_prof_data(top, bottom, istart, iend, budget_flag=long, aoa_deg=aoa_deg)
     top_ref = export_drag_decomposition(top, istart, iend)
     bot_ref = export_drag_decomposition(bot, istart, iend)
     return top_ref, bot_ref
 
 
-def run(nek_dir, mesh_file, out_file=None, istart=25, iend=80, long=1):
+def run(nek_dir, mesh_file, out_file=None, istart=25, iend=80, long=1, aoa_deg=5.0):
     """Full pipeline; optionally save `out_file` (.mat) and return a Result."""
-    top_ref, bot_ref = process(nek_dir, mesh_file, istart, iend, long)
+    top_ref, bot_ref = process(nek_dir, mesh_file, istart, iend, long, aoa_deg=aoa_deg)
     if out_file:
         save_Re200k(top_ref, bot_ref, out_file)
     return Result.from_refs(top_ref, bot_ref, name=out_file or "in-memory")

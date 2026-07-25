@@ -1,0 +1,23 @@
+#!/bin/bash
+set -euo pipefail
+
+CASE_NAME="${CASE_NAME:-tcf}"
+KTH_SOURCE_ROOT="${KTH_SOURCE_ROOT:-../KTH_Framework}"
+KTH_SOURCE_ROOT="$(cd "${KTH_SOURCE_ROOT}" && pwd)"
+TOOLBOX_SRC="${KTH_TOOLBOX_SRC:-${KTH_SOURCE_ROOT}/Toolbox}"
+NEK_SOURCE_ROOT="${KTH_NEK_SOURCE_ROOT:-${KTH_SOURCE_ROOT}/Nek5000}"
+
+source "${TOOLBOX_SRC}/toolbox_path.sh"
+
+export TOOLBOX_SRC
+export NEK_SOURCE_ROOT
+export CASE="${CASE_NAME}"
+export FC="mpifort ${TOOLBOX_INC}"
+export CC="${CC:-mpicc}"
+export CFLAGS="${CFLAGS:-}"
+export PPLIST="${PPLIST:-}"
+export USR="frame.o mntrlog_block.o mntrlog.o mntrtmr_block.o mntrtmr.o rprm_block.o rprm.o io_tools_block.o io_tools.o pstat2D.o pstat2D_IO.o"
+export USR_LFLAGS="${USR_LFLAGS:-}"
+
+"${NEK_SOURCE_ROOT}/bin/makenek" clean || true
+"${NEK_SOURCE_ROOT}/bin/makenek" "${CASE_NAME}"

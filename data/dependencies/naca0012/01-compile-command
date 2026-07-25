@@ -1,0 +1,26 @@
+#!/bin/bash
+set -euo pipefail
+
+CASE_NAME="naca_wing"
+SOURCE_ROOT="${NEK_SOURCE_ROOT:-../nek1072/trunk/nek}"
+
+while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+        --m)
+            CASE_NAME="$2"
+            shift
+            ;;
+        --source-root)
+            SOURCE_ROOT="$2"
+            shift
+            ;;
+        *)
+            echo "Unknown argument: $1" >&2
+            exit 1
+            ;;
+    esac
+    shift
+done
+
+./makenek clean "${SOURCE_ROOT}"
+./makenek "${CASE_NAME}" "${SOURCE_ROOT}"

@@ -13,7 +13,7 @@ from .diagnostic import diagnostic, trapezoidal2
 _BUDGET_SUF = ("xx", "yy", "zz", "xy", "xz", "yz")
 
 
-def load_prof_data(top, bottom, istart, iend, budget_flag=1):
+def load_prof_data(top, bottom, istart, iend, budget_flag=1, aoa_deg=5.0, verbose=True):
     bot = bottom
     Uinf = 1.0
     rho = float(top[0]["rho"])
@@ -136,7 +136,7 @@ def load_prof_data(top, bottom, istart, iend, budget_flag=1):
         _budget_scalars(top, bot, rng, nu)
 
     # --- Cl / Cd decomposition (all profiles) ------------------------------
-    _cl_cd(top, bot, npts, nyn, mu, rho)
+    _cl_cd(top, bot, npts, nyn, mu, rho, aoa_deg=aoa_deg, verbose=verbose)
 
     return top, bot
 
@@ -183,7 +183,7 @@ def _budget_scalars(top, bot, rng, nu):
         e["Ckp"] = -_S(e, "C") * nu / ut4 / 2
 
 
-def _cl_cd(top, bot, npts, nyn, mu, rho):
+def _cl_cd(top, bot, npts, nyn, mu, rho, aoa_deg=5.0, verbose=True):
     rhoinf = 1.0
     pinf = top[0]["pinf"]
 
@@ -222,16 +222,17 @@ def _cl_cd(top, bot, npts, nyn, mu, rho):
     N2 = N2_p + N2_s
     A2 = A2_p + A2_s
 
-    c5, s5 = np.cos(np.deg2rad(5)), np.sin(np.deg2rad(5))
-    cl2 = 2 * (N2 * c5 - A2 * s5)
-    cd2 = 2 * (N2 * s5 + A2 * c5)
-    cd_p = 2 * (N2_p * s5 + A2_p * c5)
-    cd_f = 2 * (N2_s * s5 + A2_s * c5)
+    ca, sa = np.cos(np.deg2rad(aoa_deg)), np.sin(np.deg2rad(aoa_deg))
+    cl2 = 2 * (N2 * ca - A2 * sa)
+    cd2 = 2 * (N2 * sa + A2 * ca)
+    cd_p = 2 * (N2_p * sa + A2_p * ca)
+    cd_f = 2 * (N2_s * sa + A2_s * ca)
     LD = cl2 / cd2
 
     for i in range(npts):
         for e in (top[i], bot[i]):
             e["cl2"], e["cd2"] = cl2, cd2
             e["cd_p"], e["cd_f"], e["LD"] = cd_p, cd_f, LD
-    print("Cl,Cd_tot,Cd_p,Cd_f,L/D")
-    print([cl2, cd2, cd_p, cd_f, LD])
+    if verbose:
+        print("Cl,Cd_tot,Cd_p,Cd_f,L/D")
+        print([cl2, cd2, cd_p, cd_f, LD])

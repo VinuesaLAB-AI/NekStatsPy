@@ -1,0 +1,97 @@
+# Template for KTH Framework/PSTAT2D channel-flow post-processing.
+# Edit source.path before running Nek on HPC.
+
+workflow: channel2d
+
+run:
+  name: channel_lc_XXX
+  root: runs
+
+case:
+  id: no_resize_lc
+  session: tcf
+  dependencies: data/dependencies/no_resize_lc
+  executable: data/dependencies/no_resize_lc/nek5000_channel
+  stage_mode: copy
+  executable_stage_mode: copy
+  overwrite: true
+
+build:
+  enabled: false
+  archive: tmp/KTH_Framework.tar.gz
+  source_dir: tmp/KTH_Framework
+  work_dir: tmp/no_resize_lc_compile
+  template_dir: data/dependencies/no_resize_lc
+  template_files:
+    - SIZE
+    - makefile_usr.inc
+    - tcf.usr
+    - tcf.par
+    - tcf.re2
+    - tcf.ma2
+    - inputs_phill_pp.in
+    - 01-compile-command
+  template_stage_mode: copy
+  template_overwrite: true
+  command: ./01-compile-command
+  env_script: ~/.bashrc.openmpi_ucx
+  # Relative to build.work_dir by default. Use an absolute path on another
+  # machine if the framework is installed outside tmp/KTH_Framework.
+  env:
+    KTH_SOURCE_ROOT: ../KTH_Framework
+  executable_name: nek5000
+  output: data/dependencies/no_resize_lc/nek5000_channel
+  logfile: build.log
+  skip_if_exists: true
+
+source:
+  path: /path/to/channel/03-results
+  pattern: res_*/sts_data/ststcf0.f*
+  stage_mode: symlink
+  # KTH PSTAT2D ignores STS_FFILE in this case, so selected files are
+  # renumbered into DATA/ststcf0.f00001...
+  first_file: 1
+  last_file: auto
+  overwrite: true
+
+pstat2d:
+  data_dir: DATA
+  static_files:
+    - DATA/int_pos
+    - DATA/c2Dtcf0.f00001
+  stage_mode: copy
+  overwrite: true
+  section: _PSTAT2D
+  c2d_fnum: 1
+  amr_nref: 0
+  sts_nstep: 10
+  sts_stime: auto
+  # Archived no_resize_lc sample value. If source.first_file > 1, auto uses the
+  # predecessor sts header instead; if file 1 starts elsewhere, update this.
+  initial_start_time: 80.00600000008
+  allow_first_file_end_time_as_start: false
+
+nek:
+  np: 1
+  mpirun: mpirun
+  executable_name: ./nek5000
+  logfile: log01.txt
+  env_script: ~/.bashrc.openmpi_ucx
+  remove_existing_int_fld: true
+  clear_sch: true
+  clear_pstat_outputs: true
+  remove_logfile: true
+  require_int_fld: true
+  completion_marker: run successful
+  abort_marker: ABORT
+
+channel_post:
+  int_fld: int_fld
+  nx: 100
+  ny: 1000
+  reb: 4600
+  nu: auto
+  rho: 1.0
+  out: LC_Reb4600_bdfd_y0_amp0.mat
+  figdir: Figs
+  save_figures: true

@@ -1,0 +1,14 @@
+# Input parameters for post-processing of the statistics of the periodic hill case
+ 
+[Fluid Properties]
+nu = 2500     #viscosity (what is set in the simulation)
+rho = 1.0     #density (what is used in the simulation)
+
+[Interpolating Mesh]
+npointsx = 100
+npointsy = 100
+xmin=0.0
+xmax=2.0
+ymin=-1.0
+ymax=1.0
+

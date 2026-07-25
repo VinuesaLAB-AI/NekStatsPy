@@ -1,0 +1,245 @@
+!-----------------------------------------------------------------------
+!
+!     user subroutines required by nek5000
+!
+!     Parameters used by this set of subroutines:
+!-----------------------------------------------------------------------
+      subroutine uservp (ix,iy,iz,ieg)
+      include 'SIZE'
+      include 'NEKUSE'          ! UDIFF, UTRANS
+
+      UDIFF =0.0
+      UTRANS=0.0
+
+      return
+      end
+!-----------------------------------------------------------------------
+      subroutine userf  (ix,iy,iz,ieg)
+      
+      include 'SIZE'
+      include 'NEKUSE'          ! FF[XYZ]
+
+      integer ix,iy,iz,ieg
+
+      ffx = 0.0
+      ffy = 0.0
+      ffz = 0.0
+
+      return
+      end
+!-----------------------------------------------------------------------
+      subroutine userq  (ix,iy,iz,ieg)
+      include 'SIZE'
+      include 'NEKUSE'          ! QVOL
+
+      QVOL   = 0.0
+
+      return
+      end
+!-----------------------------------------------------------------------
+      subroutine userchk
+      implicit none
+      include 'SIZE'            !
+      include 'TSTEP'           ! ISTEP, lastep, time
+      include 'INPUT'           ! IF3D, PARAM
+      
+!     start framework
+      if (ISTEP.eq.0) call frame_start
+
+!     monitor simulation
+      call frame_monitor
+
+!     post processing step
+      call pstat2d_main()
+      
+!     finish simulation
+      LASTEP=1
+
+!     finalise framework
+      if (ISTEP.eq.NSTEPS.or.LASTEP.eq.1) then
+         call frame_end
+      endif
+      
+      call exitt0
+     
+      return
+      end
+!-----------------------------------------------------------------------
+      subroutine userbc (ix,iy,iz,iside,eg)
+      include 'SIZE'
+      include 'NEKUSE'          ! UX, UY, UZ, TEMP, X, Y
+
+!     velocity
+      ux =  0.0
+      uy =  0.0
+      uz =  0.0
+
+      return
+      end
+!-----------------------------------------------------------------------
+      subroutine useric (ix,iy,iz,ieg)
+      include 'SIZE'
+      include 'NEKUSE'          ! UX, UY, UZ, TEMP, Z
+
+!     argument list
+      integer ix,iy,iz,ieg
+
+      ux = 1.
+      uy = 0.
+      uz = 0.
+
+      return
+      end
+!-----------------------------------------------------------------------
+      subroutine usrdat
+      include 'SIZE'
+
+      return
+      end
+!-----------------------------------------------------------------------
+      subroutine usrdat2
+      include 'SIZE'
+      include 'SOLN'            ! vx,vy,vz,pr,t
+      include 'GEOM'            ! boundaryID
+      include 'INPUT'           ! cbc
+      
+      integer iel
+c     mesh stretching
+      real Betax, Betay
+c     Hill parameters
+      real Lx, Ly, Lz, W, H
+      common /hill_param/ Lx, Ly, Lz, W, H, Betax, Betay
+      
+      Betax = 2.0 ! Not used
+      Betay = 2.6 ! Progressive ratio for y
+      !Domian size 
+      Lx = 6.283185307    
+      Ly = 1.0            ! this should be 2xh since we are full channel
+      Lz = 3.141592654  !
+      W  = 1.929
+      H = 1.0
+      
+c     Transform box mesh to channel (only for the conforming mesh!!)
+      !call box2phill
+
+c      call gen_re2(0)
+
+c     mark faces for object definition
+      do iel=1,nelt
+         if (cbc(1,iel,1) .eq. 'W  ') then  ! bottom wall
+            boundaryID(1,iel) = 1
+         else if (cbc(3,iel,1) .eq. 'W  ') then ! top wall
+            boundaryID(3,iel) = 2
+         endif 
+      enddo
+
+      return
+      end
+!-----------------------------------------------------------------------
+      subroutine usrdat3
+      include 'SIZE'
+      
+      return
+      end
+!======================================================================
+!> @brief Register user specified modules
+      subroutine frame_usr_register
+      implicit none
+
+      include 'SIZE'
+      include 'FRAMELP'
+!-----------------------------------------------------------------------
+!     register modules
+      call io_register()
+      call pstat2d_register()
+
+      return
+      end subroutine
+!======================================================================
+!> @brief Initialise user specified modules
+      subroutine frame_usr_init
+      implicit none
+
+      include 'SIZE'
+      include 'FRAMELP'
+!-----------------------------------------------------------------------
+!     initialise modules
+      call pstat2d_init()
+
+      return
+      end subroutine
+!======================================================================
+!> @brief Finalise user specified modules
+      subroutine frame_usr_end
+      implicit none
+
+      include 'SIZE'
+      include 'FRAMELP'
+!-----------------------------------------------------------------------
+!     finalise modules
+      
+      return
+      end subroutine
+!======================================================================
+      subroutine box2phill
+      implicit none
+      include 'SIZE'
+      include 'GEOM'            ! {x,y,z}m1
+      include 'INPUT'           ! param
+      include 'SOLN'
+
+      integer i, ntot
+      real Betax, Betay
+      real Lx, Ly, Lz, Wh, H    ! x dimension, y dimension, hill half width, hill height
+      common /hill_param/ Lx, Ly, Lz, Wh, H, Betax ,Betay
+      real shift, amp
+      real xscale, yscale, zscale, yh, xx, yy, zz
+      real hill_step,hill_height,xfac,glmax,glmin
+      real xmin, xmax, ymin, ymax, zmin, zmax
+      save xmin, xmax, ymin, ymax, zmin, zmax
+      logical ifminmax
+      save ifminmax
+      data ifminmax /.false./
+      
+      ntot = nx1*ny1*nz1*nelt
+
+      if (.not.ifminmax) then
+         ifminmax = .true.
+         xmin = glmin(xm1,ntot)
+         xmax = glmax(xm1,ntot)
+         ymin = glmin(ym1,ntot)
+         ymax = glmax(ym1,ntot)
+         if (if3d) then
+            zmin = glmin(zm1,ntot)
+            zmax = glmax(zm1,ntot)
+         endif
+      endif
+
+c     increase resolution near the wall
+      do i=1,ntot
+!          ym1(i,1,1,1) = 0.5*(tanh(Betay*(2*ym1(i,1,1,1)-1.0))/
+!      $    tanh(Betay) + 1.0)
+      ym1(i,1,1,1)=ymax-(tanh(Betay*(1.0-ym1(i,1,1,1)))/tanh(Betay))
+      enddo
+      
+c     rescale rectangular domain [0,Lx]x[0,Ly]x[0,Lz]
+      xscale = Lx/(xmax-xmin)
+      yscale = Ly/(ymax-ymin)
+      do i=1,ntot
+         xx = xm1(i,1,1,1)
+         yy = ym1(i,1,1,1)
+         xm1(i,1,1,1) = (xx - xmin) * xscale
+         ym1(i,1,1,1) = (yy - ymin) * yscale
+      enddo
+      if (if3d) then
+         zscale = Lz/(zmax-zmin)
+         do i=1,ntot
+            zz = zm1(i,1,1,1)
+            zm1(i,1,1,1) = (zz - zmin) * zscale
+         enddo
+      endif
+
+
+      return
+      end
+c-----------------------------------------------------------------------
