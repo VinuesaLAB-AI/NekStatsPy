@@ -261,7 +261,8 @@ The run folder contains:
 
 ```text
 runs/naca_wing_clcd_backward/
-├── clcd_backward.csv       # Cl, Cd, Cd_p, Cd_f, L/D, and timing metadata
+├── naca4412_clcd_backward.csv
+│                          # Cl, Cd, Cd_p, Cd_f, L/D, and timing metadata
 ├── nek_windows.csv         # planned/generated/reused Nek windows
 ├── int_fld/                # per-window int_fld snapshots
 ├── logs/                   # per-window Nek logs

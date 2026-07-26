@@ -71,7 +71,8 @@ Important outputs are:
 
 ```text
 <output-dir>/
-├── clcd_backward.csv       # One result row per backward window
+├── <case-name>_clcd_backward.csv
+│                          # One result row per backward window
 ├── nek_windows.csv         # Window, timing, file, and status manifest
 ├── run_config.json         # Reproducible command configuration
 ├── int_fld/                # Renamed per-window int_fld files

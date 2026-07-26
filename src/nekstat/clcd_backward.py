@@ -11,6 +11,7 @@ import csv
 import copy
 import math
 import os
+import re
 import shutil
 import struct
 import tempfile
@@ -142,7 +143,7 @@ def run_clcd_backward_from_config(
         nek_conf=_section(work_conf, "nek"),
     )
 
-    paths = _backward_paths(run_paths, windows)
+    paths = _backward_paths(work_conf, run_paths, windows)
     paths.int_fld_dir.mkdir(parents=True, exist_ok=True)
     paths.log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -599,6 +600,7 @@ def _backward_run_config(
 
 
 def _backward_paths(
+    conf: Mapping[str, Any],
     run_paths: RunPaths,
     windows: Sequence[BackwardWindow],
 ) -> ClCdBackwardPaths:
@@ -606,11 +608,24 @@ def _backward_paths(
         root=run_paths.root,
         config=run_paths.config,
         manifest=run_paths.root / "nek_windows.csv",
-        csv=run_paths.root / "clcd_backward.csv",
+        csv=run_paths.root / _clcd_csv_name(conf),
         int_fld_dir=run_paths.root / "int_fld",
         log_dir=run_paths.root / "logs",
         windows=tuple(windows),
     )
+
+
+def _clcd_csv_name(conf: Mapping[str, Any]) -> str:
+    case_conf = _section(conf, "case")
+    case_name = _safe_filename_part(
+        case_conf.get("id") or case_conf.get("name") or case_conf.get("session") or "case"
+    )
+    return f"{case_name}_clcd_backward.csv"
+
+
+def _safe_filename_part(value: Any) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value).strip()).strip("._-")
+    return safe or "case"
 
 
 def _window_start_time(stat: StsFile, nek_conf: Mapping[str, Any]) -> float:

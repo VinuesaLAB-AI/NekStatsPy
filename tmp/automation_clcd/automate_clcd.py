@@ -269,6 +269,11 @@ def default_output_dir(case_name: str, last_file: int, stride: int, aoa_deg: flo
     return SCRIPT_DIR / "clcd_backward_results" / name
 
 
+def clcd_csv_name(case_name: str) -> str:
+    safe_case = re.sub(r"[^A-Za-z0-9_.-]+", "_", case_name.strip()).strip("._-")
+    return f"{safe_case or 'case'}_clcd_backward.csv"
+
+
 def update_rea_text(
     template: str, last_file: int, first_file: int, start_time: float
 ) -> str:
@@ -700,7 +705,7 @@ def run_matlab(
     command = matlab_preflight(args, matlab_dir)
     matlab_func_dir = matlab_dir / "matlab_func"
     mesh_file = matlab_dir / "int_mesh.mat"
-    output_csv = output_dir / "clcd_backward.csv"
+    output_csv = output_dir / clcd_csv_name(args.case_name)
     expression = (
         f"addpath('{matlab_quote(matlab_func_dir)}');"
         f"compute_clcd_batch('{matlab_quote(manifest_path)}',"

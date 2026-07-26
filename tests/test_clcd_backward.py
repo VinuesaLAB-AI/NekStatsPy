@@ -167,6 +167,7 @@ class ClCdBackwardTests(unittest.TestCase):
             manifest = paths.manifest.read_text(encoding="utf-8")
 
         self.assertEqual(paths.root.name, "clcd")
+        self.assertEqual(paths.csv.name, "naca4412_clcd_backward.csv")
         self.assertEqual([(w.first_file, w.last_file) for w in paths.windows], [(2, 4), (4, 4)])
         self.assertIn("planned", manifest)
         self.assertIn("int_fld_first00002_last00004", manifest)
