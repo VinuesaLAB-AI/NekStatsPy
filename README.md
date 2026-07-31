@@ -57,7 +57,7 @@ examples, or point the tools at your own Nek output.
 nekstat run configs/naca4412_post.yml
 nekstat run configs/naca0012_post.yml
 
-# run fixed-end backward windows and write a Python-only Cl/Cd convergence CSV
+# run blockwise windows and write Python-only Cl/Cd convergence CSVs
 nekstat clcd-backward configs/naca4412_post.yml
 nekstat clcd-backward configs/naca0012_post.yml
 
@@ -162,7 +162,7 @@ nekstat/
 │   ├── naca_geom.py     naca_prof2 / create_profiles / rot / save_inter_mesh
 │   ├── pipeline.py      high-level run() / process()
 │   ├── nek5000.py       config -> runs/<name> staging + Nek launch + post hook
-│   ├── clcd_backward.py fixed-end backward Cl/Cd convergence sweeps
+│   ├── clcd_backward.py blockwise backward Cl/Cd convergence sweeps
 │   ├── kth_channel.py   KTH Framework/PSTAT2D channel staging + run hook
 │   ├── channel_intfld.py/channel_pipeline.py
 │   │                    KTH int_fld reader + MATLAB-free channel post
@@ -231,7 +231,7 @@ The main config fields are:
 | `source` | source result tree, glob, and 1-based window over sorted `sts*` files |
 | `nek` | MPI launch settings and `.rea` parameter overrides |
 | `post` | existing Python `int_fld -> stat_*.mat` options |
-| `clcd_backward` | Python-only fixed-end Cl/Cd convergence sweep options |
+| `clcd_backward` | Python-only blockwise Cl/Cd convergence sweep options |
 | `pstat2d` / `channel_post` | KTH PSTAT2D `tcf.par` patching and channel `.mat` export |
 
 Use `--prepare-only` to stage and inspect the folder on a login node. Use
@@ -250,28 +250,38 @@ different physical time, update `nek.initial_start_time` in the config.
 window and output settings. The ordinary `nekstat run` command continues to use
 the `post` section for the full `int_fld -> stat_*.mat` export.
 
-The backward workflow keeps the final selected `sts` file fixed and advances the
-first included file by `clcd_backward.stride`. For a sweep with
-`first_file: 100`, `last_file: 199`, and `stride: 5`, the Nek parameters are
-patched as windows `100-199`, `105-199`, `110-199`, and so on. For every window,
-`p070` is inferred from the predecessor `sts` header, matching the single-run
-`sampling_start_time: auto` behavior.
+The backward workflow first splits selected `sts` files into chronological
+short blocks. For a sweep with `first_file: 100`, `last_file: 199`, and
+`block_size_files: 10`, Nek is run for `100-109`, `110-119`, `120-129`, and so
+on. For every block, `p070` is inferred from the predecessor `sts` header, so
+the Nek averaging interval is exactly the block start time to the block end
+time.
+
+If the selected file count is not divisible by `block_size_files`, the final
+short block is dropped by default. Set `include_incomplete_block: true` to keep
+that shorter-duration block. The backward convergence table is then computed
+from the block table using duration-weighted averages over the latest block,
+latest two blocks, latest three blocks, and so on.
+
+The Cl/Cd CSV filenames are derived from the top-level `run.name`.
 
 The run folder contains:
 
 ```text
 runs/naca_wing_clcd_backward/
-├── naca4412_clcd_backward.csv
-│                          # Cl, Cd, Cd_p, Cd_f, L/D, and timing metadata
-├── nek_windows.csv         # planned/generated/reused Nek windows
-├── int_fld/                # per-window int_fld snapshots
-├── logs/                   # per-window Nek logs
+├── <run.name>_clcd_blocks.csv
+│                          # one short-window Cl/Cd row per Nek block
+├── <run.name>_clcd_backward.csv
+│                          # duration-weighted backward averages over blocks
+├── nek_windows.csv         # planned/generated/reused Nek block windows
+├── int_fld/                # per-block int_fld snapshots
+├── logs/                   # per-block Nek logs
 ├── ZSTAT/                  # staged sts files and transient int_fld
 └── A0/                     # transient Nek output directory
 ```
 
-Existing valid per-window `int_fld` files are reused unless `--force` or
-`clcd_backward.force: true` is set. `--skip-nek` recomputes the CSV from existing
+Existing valid per-block `int_fld` files are reused unless `--force` or
+`clcd_backward.force: true` is set. `--skip-nek` recomputes the CSVs from existing
 `int_fld` snapshots. `--discard-int-fld` removes those snapshots after the CSV is
 written. The coefficient extraction is pure Python and reads only the records
 needed for Cl/Cd: `F4` and `D1-D4`.
