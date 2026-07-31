@@ -251,17 +251,32 @@ window and output settings. The ordinary `nekstat run` command continues to use
 the `post` section for the full `int_fld -> stat_*.mat` export.
 
 The backward workflow first splits selected `sts` files into chronological
-short blocks. For a sweep with `first_file: 100`, `last_file: 199`, and
-`block_size_files: 10`, Nek is run for `100-109`, `110-119`, `120-129`, and so
-on. For every block, `p070` is inferred from the predecessor `sts` header, so
-the Nek averaging interval is exactly the block start time to the block end
-time.
+short blocks. The NACA templates use `block_mode: accumulator_reset`, which
+reads the `sts` header sample count and starts a new block whenever that count
+drops. This marks a fresh statistics accumulator cycle, for example
+`7500, 10000, ..., 30000, 5000` becomes two blocks, with the second block
+starting at the `5000` file.
 
-If the selected file count is not divisible by `block_size_files`, the final
-short block is dropped by default. Set `include_incomplete_block: true` to keep
-that shorter-duration block. The backward convergence table is then computed
-from the block table using duration-weighted averages over the latest block,
-latest two blocks, latest three blocks, and so on.
+For every block, `p070` is inferred from the predecessor `sts` header, so the
+Nek averaging interval is exactly the block start time to the block end time.
+The block table records the first and last `sts` sample counts so reset-detected
+blocks can be audited.
+
+`clcd_backward.allow_time_overlap_between_blocks: true` allows physical-time
+overlap between two detected accumulator cycles. Time must still increase
+strictly inside each block; when a reset block overlaps the previous block, its
+start time is inferred from its own `sts` sample-count/time slope rather than
+from the previous cycle's last file.
+
+Use `block_mode: fixed_files` with `block_size_files: 10` to force constant-size
+blocks such as `100-109`, `110-119`, `120-129`. In that fixed mode, if the
+selected file count is not divisible by `block_size_files`, the final short
+block is dropped by default. Set `include_incomplete_block: true` to keep that
+shorter-duration fixed block.
+
+The backward convergence table is computed from the block table using
+duration-weighted averages over the latest block, latest two blocks, latest
+three blocks, and so on.
 
 The Cl/Cd CSV filenames are derived from the top-level `run.name`.
 

@@ -27,12 +27,14 @@ from ._data import data_path, sample_paths
 from .nek5000 import (
     BuildPaths,
     RunPaths,
+    StsHeader,
     StsFile,
     build_from_config,
     build_solver,
     load_config,
     prepare_run,
     read_sts_header,
+    read_sts_header_info,
     run_from_config,
 )
 from .clcd_backward import (
@@ -68,9 +70,10 @@ __all__ = [
     "read_data_profiles", "load_prof_data",
     "export_drag_decomposition", "save_Re200k",
     "build_mesh", "save_inter_mesh",
-    "BuildPaths", "RunPaths", "StsFile",
+    "BuildPaths", "RunPaths", "StsHeader", "StsFile",
     "build_from_config", "build_solver",
-    "load_config", "prepare_run", "read_sts_header", "run_from_config",
+    "load_config", "prepare_run", "read_sts_header", "read_sts_header_info",
+    "run_from_config",
     "BackwardWindow", "ClCdBackwardPaths", "ClCdCoefficients", "IntFldHeader",
     "build_backward_windows", "compute_clcd_from_int_fld",
     "parse_int_fld_header", "run_clcd_backward_from_config",

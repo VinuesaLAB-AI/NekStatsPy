@@ -10,14 +10,21 @@ from nekstat.nek5000 import (
     patch_rea_params,
     prepare_run,
     read_sts_header,
+    read_sts_header_info,
     run_nek,
 )
 
 
-def write_sts(path: Path, end_time: float, payload: bytes = b"") -> None:
+def write_sts(
+    path: Path,
+    end_time: float,
+    payload: bytes = b"",
+    *,
+    sample_count: int = 500,
+) -> None:
     header = (
         f"#std 8 12 12 1 4692 12345 {end_time:20.13E} "
-        "500 0 1 aa 66"
+        f"{sample_count} 0 1 aa 66"
     )
     path.write_bytes(header.encode("ascii").ljust(132, b" ") + payload)
 
@@ -64,12 +71,15 @@ class Nek5000RunTests(unittest.TestCase):
     def test_read_sts_header_extracts_end_time(self):
         with tempfile.TemporaryDirectory() as tmp:
             sts = Path(tmp) / "stsnaca_wing0.f00001"
-            write_sts(sts, 15.525)
+            write_sts(sts, 15.525, sample_count=7500)
 
             header, end_time = read_sts_header(sts)
+            info = read_sts_header_info(sts)
 
         self.assertTrue(header.startswith("#std"))
         self.assertAlmostEqual(end_time, 15.525)
+        self.assertAlmostEqual(info.end_time, 15.525)
+        self.assertEqual(info.sample_count, 7500)
 
     def test_patch_rea_params_preserves_comments(self):
         with tempfile.TemporaryDirectory() as tmp:

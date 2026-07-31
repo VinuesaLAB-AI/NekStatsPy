@@ -28,6 +28,7 @@ from .pipeline import run as run_post
 __all__ = [
     "BuildPaths",
     "RunPaths",
+    "StsHeader",
     "StsFile",
     "build_from_config",
     "build_solver",
@@ -35,6 +36,7 @@ __all__ = [
     "prepare_run",
     "patch_rea_params",
     "read_sts_header",
+    "read_sts_header_info",
     "run_nek",
     "run_from_config",
     "stage_stats_files",
@@ -70,6 +72,15 @@ class BuildPaths:
 
 
 @dataclass(frozen=True)
+class StsHeader:
+    """Metadata parsed from the fixed-width text header of one ``sts`` file."""
+
+    text: str
+    end_time: float
+    sample_count: Optional[int]
+
+
+@dataclass(frozen=True)
 class StsFile:
     """One source ``sts`` file staged into the run-local ``ZSTAT`` directory."""
 
@@ -79,6 +90,8 @@ class StsFile:
     end_time: float
     header: str
     predecessor_end_time: Optional[float]
+    sample_count: Optional[int] = None
+    predecessor_sample_count: Optional[int] = None
 
 
 def load_config(path: Pathish) -> Dict[str, Any]:
@@ -305,14 +318,18 @@ def stage_stats_files(
     staged: List[StsFile] = []
     prefix = str(source_conf.get("target_prefix") or f"sts{session}0.f")
     overwrite = bool(source_conf.get("overwrite", False))
-    previous_end_time = (
-        read_sts_header(files[first_index - 2])[1]
-        if first_index > 1
-        else None
-    )
+    allow_time_overlap = bool(source_conf.get("allow_time_overlap", False))
+    predecessor_info = read_sts_header_info(files[first_index - 2]) if first_index > 1 else None
+    previous_end_time = predecessor_info.end_time if predecessor_info else None
+    previous_sample_count = predecessor_info.sample_count if predecessor_info else None
     for src_pos, src in enumerate(selected, start=first_index):
-        header, end_time = read_sts_header(src)
-        if previous_end_time is not None and end_time <= previous_end_time:
+        info = read_sts_header_info(src)
+        header, end_time = info.text, info.end_time
+        if (
+            previous_end_time is not None
+            and end_time <= previous_end_time
+            and not allow_time_overlap
+        ):
             raise ValueError(
                 "sts end times are not strictly increasing: "
                 f"file {src_pos - 1} ends at {previous_end_time:.16g}, "
@@ -328,9 +345,12 @@ def stage_stats_files(
                 end_time=end_time,
                 header=header,
                 predecessor_end_time=previous_end_time,
+                sample_count=info.sample_count,
+                predecessor_sample_count=previous_sample_count,
             )
         )
         previous_end_time = end_time
+        previous_sample_count = info.sample_count
     return staged
 
 
@@ -603,6 +623,13 @@ def patch_rea_params(path: Pathish, params: Mapping[int, Any]) -> None:
 def read_sts_header(path: Pathish) -> Tuple[str, float]:
     """Return ``(header_text, end_time)`` from a Nek ``sts`` file header."""
 
+    info = read_sts_header_info(path)
+    return info.text, info.end_time
+
+
+def read_sts_header_info(path: Pathish) -> StsHeader:
+    """Return parsed header text, end time, and accumulated sample count."""
+
     path = Path(path)
     try:
         payload = path.read_bytes()[:136]
@@ -621,11 +648,22 @@ def read_sts_header(path: Pathish) -> Tuple[str, float]:
             if not fields or fields[0] != "#std" or len(fields) < 8:
                 raise ValueError(f"unexpected header {header!r}")
             end_time = _coerce_float(fields[7], f"{path}: sts header end time")
-            return header, end_time
+            sample_count = _parse_optional_sts_sample_count(path, fields)
+            return StsHeader(header, end_time, sample_count)
         except (UnicodeDecodeError, ValueError) as exc:
             failures.append(f"offset {offset}: {exc}")
 
     raise ValueError(f"{path}: cannot parse sts header ({'; '.join(failures)})")
+
+
+def _parse_optional_sts_sample_count(path: Path, fields: Sequence[str]) -> Optional[int]:
+    if len(fields) < 9:
+        return None
+    raw = _coerce_float(fields[8], f"{path}: sts header sample count")
+    rounded = int(round(raw))
+    if abs(raw - rounded) > 1.0e-9:
+        raise ValueError(f"{path}: sts header sample count is not an integer: {fields[8]}")
+    return rounded
 
 
 def _discover_stats(source_root: Path, pattern: str) -> List[Path]:

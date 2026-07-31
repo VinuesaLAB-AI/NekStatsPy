@@ -61,6 +61,8 @@ class BackwardWindow:
     number_of_files: int
     start_time: float
     last_file_end_time: float
+    first_sample_count: Optional[int] = None
+    last_sample_count: Optional[int] = None
 
     @property
     def duration(self) -> float:
@@ -159,10 +161,12 @@ def run_clcd_backward_from_config(
 
     block_size_files = _block_size_from_config(clcd_conf)
     include_incomplete_block = bool(clcd_conf.get("include_incomplete_block", False))
+    block_mode = str(clcd_conf.get("block_mode", "fixed_files"))
     windows = build_backward_windows(
         run_paths.staged_stats,
         block_size_files=block_size_files,
         include_incomplete_block=include_incomplete_block,
+        block_mode=block_mode,
         nek_conf=_section(work_conf, "nek"),
     )
 
@@ -206,21 +210,27 @@ def build_backward_windows(
     *,
     block_size_files: Optional[int] = None,
     include_incomplete_block: bool = False,
+    block_mode: str = "fixed_files",
     stride: Optional[int] = None,
     nek_conf: Mapping[str, Any],
 ) -> Tuple[BackwardWindow, ...]:
     """Create chronological block windows from staged, contiguous ``sts`` metadata.
 
-    ``stride`` is accepted as a compatibility alias for the old config name, but
-    the value now means block size rather than a fixed-end window stride.
+    ``block_mode="accumulator_reset"`` starts a new block whenever the ``sts``
+    header sample count drops. ``stride`` is accepted as a compatibility alias
+    for the old config name, but the value now means block size in fixed mode.
     """
 
     if not staged_stats:
         raise ValueError("Cannot build backward windows without staged sts files")
+    mode = _normalize_block_mode(block_mode)
     if block_size_files is None:
-        if stride is None:
+        if stride is not None:
+            block_size_files = stride
+        elif mode == "fixed_files":
             raise ValueError("clcd_backward.block_size_files must be a positive integer")
-        block_size_files = stride
+        else:
+            block_size_files = 1
     elif stride is not None and int(stride) != int(block_size_files):
         raise ValueError(
             "clcd_backward.block_size_files and legacy clcd_backward.stride disagree"
@@ -239,14 +249,27 @@ def build_backward_windows(
         suffix = " ..." if len(missing) > 12 else ""
         raise ValueError(f"staged sts files are not contiguous; missing {preview}{suffix}")
 
+    if mode == "accumulator_reset":
+        stat_blocks = _accumulator_reset_blocks(stats)
+    else:
+        stat_blocks = _fixed_file_blocks(
+            stats,
+            block_size_files=block_size_files,
+            include_incomplete_block=include_incomplete_block,
+        )
+
     windows: List[BackwardWindow] = []
-    for offset in range(0, len(stats), block_size_files):
-        block = stats[offset:offset + block_size_files]
-        if len(block) < block_size_files and not include_incomplete_block:
-            break
+    previous_sample_time_step: Optional[float] = None
+    for block in stat_blocks:
+        _validate_block_time_order(block)
         first_stat = block[0]
         last_stat = block[-1]
-        start_time = _window_start_time(first_stat, nek_conf)
+        start_time = _block_start_time(
+            block,
+            nek_conf,
+            reset_aware=mode == "accumulator_reset",
+            fallback_sample_time_step=previous_sample_time_step,
+        )
         if start_time >= last_stat.end_time:
             raise ValueError(
                 f"invalid start time {start_time:.16g} for block starting at "
@@ -261,8 +284,13 @@ def build_backward_windows(
                 number_of_files=len(block),
                 start_time=start_time,
                 last_file_end_time=last_stat.end_time,
+                first_sample_count=first_stat.sample_count,
+                last_sample_count=last_stat.sample_count,
             )
         )
+        block_sample_time_step = _sample_time_step_from_block(block)
+        if block_sample_time_step is not None:
+            previous_sample_time_step = block_sample_time_step
     if not windows:
         raise ValueError(
             "No complete Cl/Cd averaging blocks were created. Reduce "
@@ -270,6 +298,147 @@ def build_backward_windows(
             "clcd_backward.include_incomplete_block: true."
         )
     return tuple(windows)
+
+
+def _normalize_block_mode(value: str) -> str:
+    mode = str(value).strip().lower().replace("-", "_")
+    aliases = {
+        "fixed": "fixed_files",
+        "fixed_file": "fixed_files",
+        "fixed_files": "fixed_files",
+        "files": "fixed_files",
+        "accumulator": "accumulator_reset",
+        "accumulator_reset": "accumulator_reset",
+        "sample_reset": "accumulator_reset",
+        "nrec_reset": "accumulator_reset",
+        "reset": "accumulator_reset",
+        "adaptive": "accumulator_reset",
+        "auto": "accumulator_reset",
+    }
+    try:
+        return aliases[mode]
+    except KeyError as exc:
+        raise ValueError(
+            "clcd_backward.block_mode must be 'fixed_files' or 'accumulator_reset'"
+        ) from exc
+
+
+def _fixed_file_blocks(
+    stats: Sequence[StsFile],
+    *,
+    block_size_files: int,
+    include_incomplete_block: bool,
+) -> List[Sequence[StsFile]]:
+    blocks: List[Sequence[StsFile]] = []
+    for offset in range(0, len(stats), block_size_files):
+        block = stats[offset:offset + block_size_files]
+        if len(block) < block_size_files and not include_incomplete_block:
+            break
+        blocks.append(block)
+    return blocks
+
+
+def _accumulator_reset_blocks(stats: Sequence[StsFile]) -> List[Sequence[StsFile]]:
+    missing = [stat.index for stat in stats if stat.sample_count is None]
+    if missing:
+        preview = ", ".join(str(index) for index in missing[:12])
+        suffix = " ..." if len(missing) > 12 else ""
+        raise ValueError(
+            "clcd_backward.block_mode: accumulator_reset requires the sts header "
+            f"sample count; missing for file(s) {preview}{suffix}"
+        )
+
+    blocks: List[List[StsFile]] = []
+    current: List[StsFile] = []
+    for stat in stats:
+        if current and stat.sample_count < current[-1].sample_count:
+            blocks.append(current)
+            current = [stat]
+        else:
+            current.append(stat)
+    if current:
+        blocks.append(current)
+    return blocks
+
+
+def _validate_block_time_order(block: Sequence[StsFile]) -> None:
+    for previous, current in zip(block, block[1:]):
+        if current.end_time <= previous.end_time:
+            raise ValueError(
+                "sts end times must be strictly increasing within each Cl/Cd "
+                f"block; file {previous.index} ends at {previous.end_time:.16g}, "
+                f"file {current.index} at {current.end_time:.16g}"
+            )
+
+
+def _block_start_time(
+    block: Sequence[StsFile],
+    nek_conf: Mapping[str, Any],
+    *,
+    reset_aware: bool,
+    fallback_sample_time_step: Optional[float],
+) -> float:
+    first = block[0]
+    if not reset_aware:
+        return _window_start_time(first, nek_conf)
+
+    if _predecessor_is_same_accumulator(first):
+        return float(first.predecessor_end_time)
+
+    if first.predecessor_end_time is None:
+        initial = nek_conf.get("initial_start_time")
+        if initial not in (None, ""):
+            return _coerce_float(initial, "nek.initial_start_time")
+
+    inferred = _infer_accumulator_start_time(
+        block,
+        fallback_sample_time_step=fallback_sample_time_step,
+    )
+    if inferred is not None:
+        return inferred
+
+    if first.predecessor_end_time is None:
+        return _window_start_time(first, nek_conf)
+
+    raise ValueError(
+        "Cannot infer the start time for reset-detected Cl/Cd block "
+        f"{first.index}-{block[-1].index}. Add another sts file from the same "
+        "accumulator cycle, set clcd_backward.allow_time_overlap_between_blocks: "
+        "false to require strict continuity, or provide a larger source window."
+    )
+
+
+def _predecessor_is_same_accumulator(stat: StsFile) -> bool:
+    if stat.predecessor_end_time is None:
+        return False
+    if stat.sample_count is None or stat.predecessor_sample_count is None:
+        return True
+    return stat.sample_count > stat.predecessor_sample_count
+
+
+def _infer_accumulator_start_time(
+    block: Sequence[StsFile],
+    *,
+    fallback_sample_time_step: Optional[float],
+) -> Optional[float]:
+    first = block[0]
+    if first.sample_count is None or first.sample_count <= 0:
+        return None
+    sample_time_step = _sample_time_step_from_block(block) or fallback_sample_time_step
+    if sample_time_step is None or sample_time_step <= 0:
+        return None
+    return first.end_time - first.sample_count * sample_time_step
+
+
+def _sample_time_step_from_block(block: Sequence[StsFile]) -> Optional[float]:
+    for previous, current in zip(block, block[1:]):
+        if previous.sample_count is None or current.sample_count is None:
+            continue
+        sample_delta = current.sample_count - previous.sample_count
+        time_delta = current.end_time - previous.end_time
+        if sample_delta > 0 and time_delta > 0:
+            return time_delta / sample_delta
+    return None
 
 
 def run_nek_windows(
@@ -491,6 +660,8 @@ def write_manifest(
         "first_file",
         "last_file",
         "number_of_files",
+        "first_sts_sample_count",
+        "last_sts_sample_count",
         "start_time",
         "end_time",
         "duration",
@@ -512,6 +683,8 @@ def write_manifest(
                 "first_file": window.first_file,
                 "last_file": window.last_file,
                 "number_of_files": window.number_of_files,
+                "first_sts_sample_count": _optional_int(window.first_sample_count),
+                "last_sts_sample_count": _optional_int(window.last_sample_count),
                 "start_time": format(window.start_time, ".16g"),
                 "end_time": format(window.last_file_end_time, ".16g"),
                 "duration": format(window.duration, ".16g"),
@@ -611,6 +784,8 @@ def _block_csv_fields() -> Tuple[str, ...]:
         "first_file",
         "last_file",
         "number_of_files",
+        "first_sts_sample_count",
+        "last_sts_sample_count",
         "start_time",
         "end_time",
         "duration",
@@ -640,6 +815,8 @@ def _backward_csv_fields() -> Tuple[str, ...]:
         "first_file",
         "last_file",
         "number_of_files",
+        "first_sts_sample_count",
+        "last_sts_sample_count",
         "start_time",
         "end_time",
         "total_duration",
@@ -663,6 +840,8 @@ def _block_row(block: _BlockAverage) -> Dict[str, Any]:
         "first_file": window.first_file,
         "last_file": window.last_file,
         "number_of_files": window.number_of_files,
+        "first_sts_sample_count": _optional_int(window.first_sample_count),
+        "last_sts_sample_count": _optional_int(window.last_sample_count),
         "start_time": format(window.start_time, ".16g"),
         "end_time": format(window.last_file_end_time, ".16g"),
         "duration": format(block.duration, ".16g"),
@@ -713,6 +892,8 @@ def _backward_row(backward_index: int, blocks: Sequence[_BlockAverage]) -> Dict[
         "first_file": first.first_file,
         "last_file": last.last_file,
         "number_of_files": sum(block.window.number_of_files for block in blocks),
+        "first_sts_sample_count": _optional_int(first.first_sample_count),
+        "last_sts_sample_count": _optional_int(last.last_sample_count),
         "start_time": format(first.start_time, ".16g"),
         "end_time": format(last.last_file_end_time, ".16g"),
         "total_duration": format(total_duration, ".16g"),
@@ -752,6 +933,9 @@ def _backward_run_config(
         source_conf["first_file"] = clcd_conf["first_file"]
     if "last_file" in clcd_conf:
         source_conf["last_file"] = clcd_conf["last_file"]
+    source_conf["allow_time_overlap"] = bool(
+        clcd_conf.get("allow_time_overlap_between_blocks", True)
+    )
     work_conf["source"] = source_conf
 
     nek_conf = _section(work_conf, "nek")
@@ -821,6 +1005,10 @@ def _clcd_csv_name(
 def _safe_filename_part(value: Any) -> str:
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value).strip()).strip("._-")
     return safe or "case"
+
+
+def _optional_int(value: Optional[int]) -> Union[int, str]:
+    return "" if value is None else int(value)
 
 
 def _block_size_from_config(clcd_conf: Mapping[str, Any]) -> int:

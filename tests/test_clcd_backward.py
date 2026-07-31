@@ -18,10 +18,10 @@ from nekstat.clcd_backward import (
 from nekstat.nek5000 import StsFile
 
 
-def write_sts(path: Path, end_time: float) -> None:
+def write_sts(path: Path, end_time: float, sample_count: int = 500) -> None:
     header = (
         f"#std 8 12 12 1 4692 12345 {end_time:20.13E} "
-        "500 0 1 aa 66"
+        f"{sample_count} 0 1 aa 66"
     )
     path.write_bytes(header.encode("ascii").ljust(132, b" "))
 
@@ -115,8 +115,11 @@ def write_minimal_case(root: Path) -> dict:
     exe.chmod(0o755)
     (mesh / "x.fort").write_text("x", encoding="utf-8")
     (mesh / "y.fort").write_text("y", encoding="utf-8")
-    for index, end_time in enumerate((10.0, 20.0, 30.0, 40.0), start=1):
-        write_sts(source / f"stsnaca_wing0.f{index:05d}", end_time)
+    for index, (end_time, sample_count) in enumerate(
+        ((10.0, 5000), (20.0, 7500), (30.0, 10000), (40.0, 5000)),
+        start=1,
+    ):
+        write_sts(source / f"stsnaca_wing0.f{index:05d}", end_time, sample_count)
     return {
         "run": {"name": "naca_wing_test", "root": str(root / "runs")},
         "case": {
@@ -155,6 +158,7 @@ class ClCdBackwardTests(unittest.TestCase):
                 end_time=float(index * 10),
                 header="#std",
                 predecessor_end_time=float((index - 1) * 10),
+                sample_count=(index - 1) * 2500,
             )
             for index in range(2, 7)
         )
@@ -178,6 +182,7 @@ class ClCdBackwardTests(unittest.TestCase):
                 end_time=float(index * 10),
                 header="#std",
                 predecessor_end_time=float((index - 1) * 10),
+                sample_count=(index - 1) * 2500,
             )
             for index in range(2, 7)
         )
@@ -195,6 +200,38 @@ class ClCdBackwardTests(unittest.TestCase):
         )
         self.assertEqual([w.start_time for w in windows], [10.0, 30.0, 50.0])
 
+    def test_build_backward_windows_can_follow_accumulator_resets(self):
+        sample_counts = (7500, 10000, 12500, 15000, 17500, 20000, 22500, 25000, 27500, 30000, 5000, 7500, 10000)
+        stats = tuple(
+            StsFile(
+                index=index,
+                source=Path(f"src{index}"),
+                staged=Path(f"dst{index}"),
+                end_time=40.0 + 0.0375 * (index - 2),
+                header="#std",
+                predecessor_end_time=40.0 + 0.0375 * (index - 3),
+                sample_count=sample_count,
+                predecessor_sample_count=5000 if index == 2 else sample_counts[index - 3],
+            )
+            for index, sample_count in zip(range(2, 15), sample_counts)
+        )
+
+        windows = build_backward_windows(
+            stats,
+            block_mode="accumulator_reset",
+            nek_conf={"sampling_start_time": "auto"},
+        )
+
+        self.assertEqual(
+            [(w.first_file, w.last_file, w.number_of_files) for w in windows],
+            [(2, 11, 10), (12, 14, 3)],
+        )
+        self.assertEqual(
+            [(w.first_sample_count, w.last_sample_count) for w in windows],
+            [(7500, 30000), (5000, 10000)],
+        )
+        self.assertAlmostEqual(windows[1].start_time, 40.3)
+
     def test_prepare_only_writes_planned_backward_manifest(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -211,6 +248,57 @@ class ClCdBackwardTests(unittest.TestCase):
         self.assertEqual([(w.first_file, w.last_file) for w in paths.windows], [(2, 3)])
         self.assertIn("planned", manifest)
         self.assertIn("int_fld_first00002_last00003", manifest)
+
+    def test_prepare_only_can_write_adaptive_reset_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            conf = write_minimal_case(root)
+            conf["clcd_backward"].pop("block_size_files")
+            conf["clcd_backward"]["block_mode"] = "accumulator_reset"
+            conf["clcd_backward"]["include_incomplete_block"] = False
+            config_path = root / "config.yml"
+            config_path.write_text(yaml.safe_dump(conf), encoding="utf-8")
+
+            paths = run_clcd_backward_from_config(config_path, prepare_only=True)
+            with paths.manifest.open(newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+
+        self.assertEqual([(w.first_file, w.last_file) for w in paths.windows], [(2, 3), (4, 4)])
+        self.assertEqual(
+            [(row["first_sts_sample_count"], row["last_sts_sample_count"]) for row in rows],
+            [("7500", "10000"), ("5000", "5000")],
+        )
+
+    def test_prepare_only_allows_time_overlap_between_reset_blocks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            conf = write_minimal_case(root)
+            source = root / "source" / "res_1" / "sts_data"
+            for index, (end_time, sample_count) in enumerate(
+                (
+                    (10.0, 5000),
+                    (20.0, 7500),
+                    (30.0, 10000),
+                    (25.0, 5000),
+                    (35.0, 10000),
+                ),
+                start=1,
+            ):
+                write_sts(source / f"stsnaca_wing0.f{index:05d}", end_time, sample_count)
+            conf["clcd_backward"].pop("block_size_files")
+            conf["clcd_backward"]["block_mode"] = "accumulator_reset"
+            conf["clcd_backward"]["allow_time_overlap_between_blocks"] = True
+            conf["clcd_backward"]["last_file"] = 5
+            config_path = root / "config.yml"
+            config_path.write_text(yaml.safe_dump(conf), encoding="utf-8")
+
+            paths = run_clcd_backward_from_config(config_path, prepare_only=True)
+
+        self.assertEqual(
+            [(w.first_file, w.last_file) for w in paths.windows],
+            [(2, 3), (4, 5)],
+        )
+        self.assertLess(paths.windows[1].start_time, paths.windows[0].last_file_end_time)
 
     def test_skip_nek_writes_block_and_weighted_backward_tables(self):
         with tempfile.TemporaryDirectory() as tmp:
