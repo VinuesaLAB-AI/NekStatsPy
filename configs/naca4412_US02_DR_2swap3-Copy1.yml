@@ -1,0 +1,86 @@
+# Template for closing the Nek5000 -> int_fld -> Python post-processing loop.
+# Edit source.path before running on HPC.
+
+run:
+  name: naca4412_US02_DR_2swap3
+  root: runs
+
+case:
+  id: naca4412
+  session: naca_wing
+  dependencies: data/dependencies/naca4412
+  executable: data/dependencies/naca4412/nek5000_4412
+  stage_mode: copy
+  executable_stage_mode: copy
+  overwrite: true
+
+build:
+  enabled: false
+  archive: tmp/Nek1093_dong.tar.gz
+  source_dir: tmp/Nek1093_dong
+  work_dir: tmp/naca4412_200k_compile
+  template_dir: data/dependencies/naca4412
+  template_stage_mode: copy
+  template_overwrite: true
+  command: ./01-compile-command
+  env_script: ~/.bashrc.openmpi_ucx
+  executable_name: nek5000
+  output: data/dependencies/naca4412/nek5000_4412
+  logfile: build.log
+  skip_if_exists: true
+
+mesh:
+  mode: copy
+  source_dir: data/ZSTAT
+  stage_mode: copy
+  overwrite: true
+
+source:
+  path: /p/scratch/deepwing/yuningw/marl_energy_cost/data/results/naca_wing/naca4412_us02_DR_2swap3/env_001
+  pattern: res_*/sts_data/stsnaca_wing0.f*
+  stage_mode: symlink
+  # Select a 1-based window from the numerically sorted matched sts files.
+  first_file: 2
+  last_file: auto
+  overwrite: true
+
+nek:
+  np: 1
+  mpirun: mpirun
+  executable_name: ./nek5000
+  logfile: logfile
+  sampling_start_time: auto
+  # Required when source.first_file is 1 and no predecessor sts file exists.
+  initial_start_time:
+  # Set true only if p070 should equal the first selected sts header end time.
+  allow_first_file_end_time_as_start: false
+  output_dir: A0
+  clear_a0: true
+  clear_sch: true
+  remove_existing_int_fld: true
+  remove_logfile: true
+  require_int_fld: true
+  completion_marker: Output interporlated field in int_fld
+  abort_marker: "ABORT:"
+
+post:
+  mesh: data/int_mesh.mat
+  out: stat_sct_ss_02_2swap3_N11_naca4412_200k.mat
+  istart: 25
+  iend: 80
+  long: 1
+  aoa_deg: 5.0
+
+# clcd_backward:
+#   # Python-only blockwise convergence sweep. This command uses the shared
+#   # case/build/mesh/source/nek sections, then overrides the source window below.
+#   output_dir: runs/naca_wing_clcd_backward
+#   # Set this to 1 only when nek.initial_start_time is provided.
+#   first_file: 2
+#   last_file: auto
+#   block_mode: accumulator_reset
+#   allow_time_overlap_between_blocks: true
+#   include_incomplete_block: false
+#   aoa_deg: 5.0
+#   force: false
+#   discard_int_fld: false

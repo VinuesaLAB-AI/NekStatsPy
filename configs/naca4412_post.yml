@@ -78,7 +78,10 @@ clcd_backward:
   # Set this to 1 only when nek.initial_start_time is provided.
   first_file: 2
   last_file: auto
-  block_size_files: 5
+  # accumulator_reset reads the sts header sample count and starts a new block
+  # whenever the count drops, which marks a fresh statistics accumulator cycle.
+  block_mode: accumulator_reset
+  allow_time_overlap_between_blocks: true
   include_incomplete_block: false
   aoa_deg: 5.0
   force: false

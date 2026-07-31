@@ -92,7 +92,8 @@ clcd_backward:
   output_dir: runs/naca0012_wing_clcd_backward
   first_file: 1
   last_file: auto
-  block_size_files: 5
+  block_mode: accumulator_reset
+  allow_time_overlap_between_blocks: true
   include_incomplete_block: false
   # Uses the archived run start time when the backward sweep includes file 1.
   initial_start_time: 7.000000000028
