@@ -66,12 +66,13 @@ source ~/run-Matlab.sh
 
 The default output directory encodes the case, final file, stride, and AOA.
 Use `--output-dir PATH` to choose it explicitly.
+Use `--run-name NAME` to set the Cl/Cd CSV filename stem explicitly.
 
 Important outputs are:
 
 ```text
 <output-dir>/
-├── <case-name>_clcd_backward.csv
+├── <run-name>_clcd_backward.csv
 │                          # One result row per backward window
 ├── nek_windows.csv         # Window, timing, file, and status manifest
 ├── run_config.json         # Reproducible command configuration

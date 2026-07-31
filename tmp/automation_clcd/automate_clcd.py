@@ -91,6 +91,10 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--case-name", default="naca_wing")
+    parser.add_argument(
+        "--run-name",
+        help="CSV filename stem; defaults to --case-name when omitted.",
+    )
     parser.add_argument("--nek-dir", type=Path, default=DEFAULT_NEK_DIR)
     parser.add_argument(
         "--zstat-dir",
@@ -269,9 +273,11 @@ def default_output_dir(case_name: str, last_file: int, stride: int, aoa_deg: flo
     return SCRIPT_DIR / "clcd_backward_results" / name
 
 
-def clcd_csv_name(case_name: str) -> str:
-    safe_case = re.sub(r"[^A-Za-z0-9_.-]+", "_", case_name.strip()).strip("._-")
-    return f"{safe_case or 'case'}_clcd_backward.csv"
+def clcd_csv_name(name: str) -> str:
+    safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", name.strip()).strip("._-")
+    if safe_name.lower().endswith("_clcd_backward"):
+        return f"{safe_name}.csv"
+    return f"{safe_name or 'case'}_clcd_backward.csv"
 
 
 def update_rea_text(
@@ -705,7 +711,7 @@ def run_matlab(
     command = matlab_preflight(args, matlab_dir)
     matlab_func_dir = matlab_dir / "matlab_func"
     mesh_file = matlab_dir / "int_mesh.mat"
-    output_csv = output_dir / clcd_csv_name(args.case_name)
+    output_csv = output_dir / clcd_csv_name(args.run_name or args.case_name)
     expression = (
         f"addpath('{matlab_quote(matlab_func_dir)}');"
         f"compute_clcd_batch('{matlab_quote(manifest_path)}',"
@@ -796,6 +802,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     manifest_path = output_dir / "nek_windows.csv"
     config = {
         "case_name": args.case_name,
+        "run_name": args.run_name,
         "first_file": args.first_file,
         "last_file": args.last_file,
         "stride": args.stride,

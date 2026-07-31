@@ -134,7 +134,8 @@ def _cmd_clcd_backward(args):
     print(f"                config:   {paths.config}")
     print(f"                manifest: {paths.manifest}")
     if not args.prepare_only:
-        print(f"                csv:      {paths.csv}")
+        print(f"                blocks:   {paths.block_csv}")
+        print(f"                backward: {paths.csv}")
 
 
 def _cmd_channel_post(args):
@@ -223,7 +224,7 @@ def main(argv=None):
 
     sc = sub.add_parser(
         "clcd-backward",
-        help="run fixed-end backward windows and write Python-only Cl/Cd convergence CSV",
+        help="run blockwise Cl/Cd windows and write Python-only backward convergence CSVs",
     )
     sc.add_argument("config", help="YAML run configuration with clcd_backward section")
     sc.add_argument("--build", action="store_true", default=None,
@@ -233,11 +234,11 @@ def main(argv=None):
     sc.add_argument("--prepare-only", action="store_true",
                     help="stage the backward run folder and write the planned manifest")
     sc.add_argument("--skip-nek", action="store_true",
-                    help="reuse existing per-window int_fld files")
+                    help="reuse existing per-block int_fld files")
     sc.add_argument("--force", action="store_true", default=None,
-                    help="regenerate per-window int_fld files even if valid outputs exist")
+                    help="regenerate per-block int_fld files even if valid outputs exist")
     sc.add_argument("--discard-int-fld", action="store_true", default=None,
-                    help="remove per-window int_fld files after writing the Cl/Cd CSV")
+                    help="remove per-block int_fld files after writing the Cl/Cd CSVs")
     sc.set_defaults(func=_cmd_clcd_backward)
 
     sch = sub.add_parser("channel-post", help="process KTH channel int_fld -> MATLAB data .mat")

@@ -1,8 +1,9 @@
-"""Backward-window Cl/Cd convergence workflow.
+"""Blockwise Cl/Cd backward-convergence workflow.
 
-This module keeps the final Nek ``sts`` file fixed, advances the first included
-file by a stride, reruns the Nek interpolation stage for each window, and writes
-one Python-computed Cl/Cd row per generated ``int_fld``.
+This module divides selected Nek ``sts`` files into chronological averaging
+blocks, reruns the Nek interpolation stage for each block, writes one
+Python-computed Cl/Cd row per block, then constructs duration-weighted backward
+averages over the latest block, latest two blocks, and so on.
 """
 
 from __future__ import annotations
@@ -52,7 +53,7 @@ __all__ = [
 
 @dataclass(frozen=True)
 class BackwardWindow:
-    """One fixed-end backward averaging window."""
+    """One short block-averaging Nek window."""
 
     window_index: int
     first_file: int
@@ -60,6 +61,10 @@ class BackwardWindow:
     number_of_files: int
     start_time: float
     last_file_end_time: float
+
+    @property
+    def duration(self) -> float:
+        return self.last_file_end_time - self.start_time
 
 
 @dataclass(frozen=True)
@@ -101,9 +106,23 @@ class ClCdBackwardPaths:
     config: Path
     manifest: Path
     csv: Path
+    block_csv: Path
     int_fld_dir: Path
     log_dir: Path
     windows: Tuple[BackwardWindow, ...]
+
+
+@dataclass(frozen=True)
+class _BlockAverage:
+    window: BackwardWindow
+    header: IntFldHeader
+    coeffs: ClCdCoefficients
+    status: str
+    int_fld_path: Path
+
+    @property
+    def duration(self) -> float:
+        return self.header.end_time - self.header.start_time
 
 
 def run_clcd_backward_from_config(
@@ -133,17 +152,21 @@ def run_clcd_backward_from_config(
     clcd_conf = _section(conf, "clcd_backward")
     if not clcd_conf:
         raise ValueError("clcd_backward section is required for this workflow")
+    csv_name = _clcd_csv_name(conf, clcd_conf, key="backward_csv", suffix="_clcd_backward")
+    block_csv_name = _clcd_csv_name(conf, clcd_conf, key="block_csv", suffix="_clcd_blocks")
     work_conf = _backward_run_config(conf, clcd_conf, base_dir)
     run_paths = prepare_run(work_conf, base_dir=base_dir)
 
-    stride = _positive_int(clcd_conf.get("stride", 1), "clcd_backward.stride")
+    block_size_files = _block_size_from_config(clcd_conf)
+    include_incomplete_block = bool(clcd_conf.get("include_incomplete_block", False))
     windows = build_backward_windows(
         run_paths.staged_stats,
-        stride=stride,
+        block_size_files=block_size_files,
+        include_incomplete_block=include_incomplete_block,
         nek_conf=_section(work_conf, "nek"),
     )
 
-    paths = _backward_paths(work_conf, run_paths, windows)
+    paths = _backward_paths(run_paths, windows, csv_name, block_csv_name)
     paths.int_fld_dir.mkdir(parents=True, exist_ok=True)
     paths.log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -170,7 +193,7 @@ def run_clcd_backward_from_config(
             force=requested_force,
         )
     write_manifest(paths.manifest, windows, paths.int_fld_dir, paths.log_dir, statuses, headers)
-    write_clcd_csv(work_conf, paths, windows, statuses, headers)
+    write_clcd_tables(work_conf, paths, windows, statuses, headers)
 
     if requested_discard:
         discard_int_fld_files(windows, paths.int_fld_dir)
@@ -181,15 +204,31 @@ def run_clcd_backward_from_config(
 def build_backward_windows(
     staged_stats: Sequence[StsFile],
     *,
-    stride: int,
+    block_size_files: Optional[int] = None,
+    include_incomplete_block: bool = False,
+    stride: Optional[int] = None,
     nek_conf: Mapping[str, Any],
 ) -> Tuple[BackwardWindow, ...]:
-    """Create fixed-end windows from staged, contiguous ``sts`` metadata."""
+    """Create chronological block windows from staged, contiguous ``sts`` metadata.
+
+    ``stride`` is accepted as a compatibility alias for the old config name, but
+    the value now means block size rather than a fixed-end window stride.
+    """
 
     if not staged_stats:
         raise ValueError("Cannot build backward windows without staged sts files")
-    if stride <= 0:
-        raise ValueError("clcd_backward.stride must be a positive integer")
+    if block_size_files is None:
+        if stride is None:
+            raise ValueError("clcd_backward.block_size_files must be a positive integer")
+        block_size_files = stride
+    elif stride is not None and int(stride) != int(block_size_files):
+        raise ValueError(
+            "clcd_backward.block_size_files and legacy clcd_backward.stride disagree"
+        )
+    block_size_files = _positive_int(
+        block_size_files,
+        "clcd_backward.block_size_files",
+    )
 
     stats = sorted(staged_stats, key=lambda item: item.index)
     indices = [item.index for item in stats]
@@ -200,24 +239,35 @@ def build_backward_windows(
         suffix = " ..." if len(missing) > 12 else ""
         raise ValueError(f"staged sts files are not contiguous; missing {preview}{suffix}")
 
-    last_stat = stats[-1]
     windows: List[BackwardWindow] = []
-    for window_index, stat in enumerate(stats[::stride], start=1):
-        start_time = _window_start_time(stat, nek_conf)
-        if start_time >= stat.end_time:
+    for offset in range(0, len(stats), block_size_files):
+        block = stats[offset:offset + block_size_files]
+        if len(block) < block_size_files and not include_incomplete_block:
+            break
+        first_stat = block[0]
+        last_stat = block[-1]
+        start_time = _window_start_time(first_stat, nek_conf)
+        if start_time >= last_stat.end_time:
             raise ValueError(
-                f"invalid start time {start_time:.16g} for file {stat.index}; "
-                f"its header end time is {stat.end_time:.16g}"
+                f"invalid start time {start_time:.16g} for block starting at "
+                f"file {first_stat.index}; its last header end time is "
+                f"{last_stat.end_time:.16g}"
             )
         windows.append(
             BackwardWindow(
-                window_index=window_index,
-                first_file=stat.index,
+                window_index=len(windows) + 1,
+                first_file=first_stat.index,
                 last_file=last_stat.index,
-                number_of_files=last_stat.index - stat.index + 1,
+                number_of_files=len(block),
                 start_time=start_time,
                 last_file_end_time=last_stat.end_time,
             )
+        )
+    if not windows:
+        raise ValueError(
+            "No complete Cl/Cd averaging blocks were created. Reduce "
+            "clcd_backward.block_size_files or set "
+            "clcd_backward.include_incomplete_block: true."
         )
     return tuple(windows)
 
@@ -434,15 +484,16 @@ def write_manifest(
     statuses: Mapping[int, str],
     headers: Mapping[int, IntFldHeader],
 ) -> None:
-    """Write the per-window Nek manifest."""
+    """Write the per-block Nek manifest."""
 
     fieldnames = (
-        "window_index",
+        "block_index",
         "first_file",
         "last_file",
         "number_of_files",
         "start_time",
-        "last_file_end_time",
+        "end_time",
+        "duration",
         "int_fld_path",
         "nek_log_path",
         "status",
@@ -457,12 +508,13 @@ def write_manifest(
         header = headers.get(window.window_index)
         rows.append(
             {
-                "window_index": window.window_index,
+                "block_index": window.window_index,
                 "first_file": window.first_file,
                 "last_file": window.last_file,
                 "number_of_files": window.number_of_files,
                 "start_time": format(window.start_time, ".16g"),
-                "last_file_end_time": format(window.last_file_end_time, ".16g"),
+                "end_time": format(window.last_file_end_time, ".16g"),
+                "duration": format(window.duration, ".16g"),
                 "int_fld_path": str((int_fld_dir / f"int_fld_{stem}").resolve()),
                 "nek_log_path": str((log_dir / f"nek_{stem}.log").resolve()),
                 "status": statuses.get(window.window_index, "planned"),
@@ -477,14 +529,14 @@ def write_manifest(
     _atomic_write_csv(manifest_path, fieldnames, rows)
 
 
-def write_clcd_csv(
+def write_clcd_tables(
     conf: Mapping[str, Any],
     paths: ClCdBackwardPaths,
     windows: Sequence[BackwardWindow],
     statuses: Mapping[int, str],
     headers: Mapping[int, IntFldHeader],
 ) -> Path:
-    """Compute and write the backward Cl/Cd convergence CSV."""
+    """Compute block Cl/Cd rows and duration-weighted backward averages."""
 
     clcd_conf = _section(conf, "clcd_backward")
     post_conf = _section(conf, "post")
@@ -494,13 +546,74 @@ def write_clcd_csv(
     mesh_file = _resolve_path(mesh, paths.root, _repo_root(paths.root))
     aoa_deg = float(clcd_conf.get("aoa_deg", post_conf.get("aoa_deg", 5.0)))
 
-    fieldnames = (
-        "window_index",
+    block_rows, block_averages = _compute_block_rows(
+        windows,
+        paths,
+        statuses,
+        headers,
+        mesh_file,
+        aoa_deg,
+    )
+    _atomic_write_csv(paths.block_csv, _block_csv_fields(), block_rows)
+    backward_rows = _compute_backward_rows(block_averages)
+    _atomic_write_csv(paths.csv, _backward_csv_fields(), backward_rows)
+    return paths.csv
+
+
+def write_clcd_csv(
+    conf: Mapping[str, Any],
+    paths: ClCdBackwardPaths,
+    windows: Sequence[BackwardWindow],
+    statuses: Mapping[int, str],
+    headers: Mapping[int, IntFldHeader],
+) -> Path:
+    """Compatibility wrapper for the blockwise Cl/Cd CSV writer."""
+
+    return write_clcd_tables(conf, paths, windows, statuses, headers)
+
+
+def _compute_block_rows(
+    windows: Sequence[BackwardWindow],
+    paths: ClCdBackwardPaths,
+    statuses: Mapping[int, str],
+    headers: Mapping[int, IntFldHeader],
+    mesh_file: Path,
+    aoa_deg: float,
+) -> Tuple[List[Dict[str, Any]], List[_BlockAverage]]:
+    rows: List[Dict[str, Any]] = []
+    averages: List[_BlockAverage] = []
+    for window in windows:
+        int_fld_path = paths.int_fld_dir / f"int_fld_{window_stem(window)}"
+        header = headers.get(window.window_index) or validate_int_fld_for_window(
+            int_fld_path,
+            window,
+        )
+        coeffs = compute_clcd_from_int_fld(int_fld_path, mesh_file, aoa_deg=aoa_deg)
+        block = _BlockAverage(
+            window=window,
+            header=header,
+            coeffs=coeffs,
+            status=statuses.get(window.window_index, ""),
+            int_fld_path=int_fld_path,
+        )
+        if block.duration <= 0:
+            raise ValueError(
+                f"{int_fld_path}: non-positive block duration {block.duration:.16g}"
+            )
+        averages.append(block)
+        rows.append(_block_row(block))
+    return rows, averages
+
+
+def _block_csv_fields() -> Tuple[str, ...]:
+    return (
+        "block_index",
         "first_file",
         "last_file",
         "number_of_files",
         "start_time",
-        "last_file_end_time",
+        "end_time",
+        "duration",
         "time_interval",
         "effective_average_time",
         "nrec",
@@ -516,44 +629,106 @@ def write_clcd_csv(
         "L_over_D",
         "int_fld_path",
     )
-    rows = []
-    for window in windows:
-        int_fld_path = paths.int_fld_dir / f"int_fld_{window_stem(window)}"
-        header = headers.get(window.window_index) or validate_int_fld_for_window(
-            int_fld_path,
-            window,
-        )
-        coeffs = compute_clcd_from_int_fld(int_fld_path, mesh_file, aoa_deg=aoa_deg)
-        rows.append(
-            {
-                "window_index": window.window_index,
-                "first_file": window.first_file,
-                "last_file": window.last_file,
-                "number_of_files": window.number_of_files,
-                "start_time": format(window.start_time, ".16g"),
-                "last_file_end_time": format(window.last_file_end_time, ".16g"),
-                "time_interval": format(header.time_interval, ".16g"),
-                "effective_average_time": format(header.effective_average_time, ".16g"),
-                "nrec": header.nrec,
-                "npoints": header.npoints,
-                "status": statuses.get(window.window_index, ""),
-                "reynolds_number": format(coeffs.reynolds_number, ".16g"),
-                "aoa_deg": format(coeffs.aoa_deg, ".16g"),
-                "pinf": format(coeffs.pinf, ".16g"),
-                "Cl": format(coeffs.cl, ".16g"),
-                "Cd": format(coeffs.cd, ".16g"),
-                "Cd_p": format(coeffs.cd_p, ".16g"),
-                "Cd_f": format(coeffs.cd_f, ".16g"),
-                "L_over_D": format(coeffs.l_over_d, ".16g"),
-                "int_fld_path": str(int_fld_path.resolve()),
-            }
-        )
-    _atomic_write_csv(paths.csv, fieldnames, rows)
-    return paths.csv
+
+
+def _backward_csv_fields() -> Tuple[str, ...]:
+    return (
+        "backward_index",
+        "first_block",
+        "last_block",
+        "number_of_blocks",
+        "first_file",
+        "last_file",
+        "number_of_files",
+        "start_time",
+        "end_time",
+        "total_duration",
+        "reynolds_number",
+        "aoa_deg",
+        "pinf",
+        "Cl",
+        "Cd",
+        "Cd_p",
+        "Cd_f",
+        "L_over_D",
+    )
+
+
+def _block_row(block: _BlockAverage) -> Dict[str, Any]:
+    window = block.window
+    header = block.header
+    coeffs = block.coeffs
+    return {
+        "block_index": window.window_index,
+        "first_file": window.first_file,
+        "last_file": window.last_file,
+        "number_of_files": window.number_of_files,
+        "start_time": format(window.start_time, ".16g"),
+        "end_time": format(window.last_file_end_time, ".16g"),
+        "duration": format(block.duration, ".16g"),
+        "time_interval": format(header.time_interval, ".16g"),
+        "effective_average_time": format(header.effective_average_time, ".16g"),
+        "nrec": header.nrec,
+        "npoints": header.npoints,
+        "status": block.status,
+        "reynolds_number": format(coeffs.reynolds_number, ".16g"),
+        "aoa_deg": format(coeffs.aoa_deg, ".16g"),
+        "pinf": format(coeffs.pinf, ".16g"),
+        "Cl": format(coeffs.cl, ".16g"),
+        "Cd": format(coeffs.cd, ".16g"),
+        "Cd_p": format(coeffs.cd_p, ".16g"),
+        "Cd_f": format(coeffs.cd_f, ".16g"),
+        "L_over_D": format(coeffs.l_over_d, ".16g"),
+        "int_fld_path": str(block.int_fld_path.resolve()),
+    }
+
+
+def _compute_backward_rows(blocks: Sequence[_BlockAverage]) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for backward_index in range(1, len(blocks) + 1):
+        selected = list(blocks[-backward_index:])
+        rows.append(_backward_row(backward_index, selected))
+    return rows
+
+
+def _backward_row(backward_index: int, blocks: Sequence[_BlockAverage]) -> Dict[str, Any]:
+    weights = np.asarray([block.duration for block in blocks], dtype=float)
+    total_duration = float(weights.sum())
+    if total_duration <= 0:
+        raise ValueError("Cannot compute backward Cl/Cd average with non-positive duration")
+
+    def avg(attr: str) -> float:
+        values = np.asarray([getattr(block.coeffs, attr) for block in blocks], dtype=float)
+        return float(np.dot(values, weights) / total_duration)
+
+    first = blocks[0].window
+    last = blocks[-1].window
+    cl = avg("cl")
+    cd = avg("cd")
+    return {
+        "backward_index": backward_index,
+        "first_block": first.window_index,
+        "last_block": last.window_index,
+        "number_of_blocks": len(blocks),
+        "first_file": first.first_file,
+        "last_file": last.last_file,
+        "number_of_files": sum(block.window.number_of_files for block in blocks),
+        "start_time": format(first.start_time, ".16g"),
+        "end_time": format(last.last_file_end_time, ".16g"),
+        "total_duration": format(total_duration, ".16g"),
+        "reynolds_number": format(avg("reynolds_number"), ".16g"),
+        "aoa_deg": format(avg("aoa_deg"), ".16g"),
+        "pinf": format(avg("pinf"), ".16g"),
+        "Cl": format(cl, ".16g"),
+        "Cd": format(cd, ".16g"),
+        "Cd_p": format(avg("cd_p"), ".16g"),
+        "Cd_f": format(avg("cd_f"), ".16g"),
+        "L_over_D": format(cl / cd, ".16g"),
+    }
 
 
 def discard_int_fld_files(windows: Iterable[BackwardWindow], int_fld_dir: Path) -> None:
-    """Remove stored per-window ``int_fld`` files after successful CSV export."""
+    """Remove stored per-block ``int_fld`` files after successful CSV export."""
 
     for window in windows:
         path = int_fld_dir / f"int_fld_{window_stem(window)}"
@@ -600,27 +775,47 @@ def _backward_run_config(
 
 
 def _backward_paths(
-    conf: Mapping[str, Any],
     run_paths: RunPaths,
     windows: Sequence[BackwardWindow],
+    csv_name: str,
+    block_csv_name: str,
 ) -> ClCdBackwardPaths:
     return ClCdBackwardPaths(
         root=run_paths.root,
         config=run_paths.config,
         manifest=run_paths.root / "nek_windows.csv",
-        csv=run_paths.root / _clcd_csv_name(conf),
+        csv=run_paths.root / csv_name,
+        block_csv=run_paths.root / block_csv_name,
         int_fld_dir=run_paths.root / "int_fld",
         log_dir=run_paths.root / "logs",
         windows=tuple(windows),
     )
 
 
-def _clcd_csv_name(conf: Mapping[str, Any]) -> str:
-    case_conf = _section(conf, "case")
-    case_name = _safe_filename_part(
-        case_conf.get("id") or case_conf.get("name") or case_conf.get("session") or "case"
-    )
-    return f"{case_name}_clcd_backward.csv"
+def _clcd_csv_name(
+    conf: Mapping[str, Any],
+    clcd_conf: Mapping[str, Any],
+    *,
+    key: str,
+    suffix: str,
+) -> str:
+    explicit = clcd_conf.get(key)
+    if explicit not in (None, ""):
+        return _safe_filename_part(explicit)
+    run_conf = _section(conf, "run")
+    stem_source = run_conf.get("name")
+    if stem_source in (None, ""):
+        case_conf = _section(conf, "case")
+        stem_source = (
+            case_conf.get("id") or case_conf.get("name") or case_conf.get("session") or "case"
+        )
+    stem = _safe_filename_part(stem_source)
+    stem_lower = stem.lower()
+    for known_suffix in ("_clcd_backward", "_clcd_blocks"):
+        if stem_lower.endswith(known_suffix):
+            stem = stem[: -len(known_suffix)]
+            break
+    return f"{stem}{suffix}.csv"
 
 
 def _safe_filename_part(value: Any) -> str:
@@ -628,11 +823,29 @@ def _safe_filename_part(value: Any) -> str:
     return safe or "case"
 
 
+def _block_size_from_config(clcd_conf: Mapping[str, Any]) -> int:
+    has_block_size = clcd_conf.get("block_size_files") not in (None, "")
+    has_legacy_stride = clcd_conf.get("stride") not in (None, "")
+    if has_block_size and has_legacy_stride:
+        block_size = int(clcd_conf["block_size_files"])
+        stride = int(clcd_conf["stride"])
+        if block_size != stride:
+            raise ValueError(
+                "clcd_backward.block_size_files and legacy clcd_backward.stride disagree"
+            )
+        return _positive_int(block_size, "clcd_backward.block_size_files")
+    if has_block_size:
+        return _positive_int(clcd_conf["block_size_files"], "clcd_backward.block_size_files")
+    if has_legacy_stride:
+        return _positive_int(clcd_conf["stride"], "clcd_backward.stride")
+    return 1
+
+
 def _window_start_time(stat: StsFile, nek_conf: Mapping[str, Any]) -> float:
     raw = nek_conf.get("sampling_start_time", "auto")
     if raw not in (None, "", "auto"):
         raise ValueError(
-            "Backward Cl/Cd windows require nek.sampling_start_time: auto; "
+            "Backward Cl/Cd block windows require nek.sampling_start_time: auto; "
             "use nek.initial_start_time only when the first predecessor sts file "
             "is unavailable."
         )
