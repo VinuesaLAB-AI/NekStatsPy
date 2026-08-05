@@ -276,6 +276,7 @@ def run_channel_nek(conf: Mapping[str, Any], paths: ChannelRunPaths) -> None:
         proc = subprocess.run(
             cmd,
             cwd=str(paths.root),
+            stdin=subprocess.DEVNULL,
             stdout=log,
             stderr=subprocess.STDOUT,
             env=env,

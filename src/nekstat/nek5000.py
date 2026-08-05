@@ -202,6 +202,7 @@ def build_solver(
         proc = subprocess.run(
             cmd,
             cwd=str(work_dir),
+            stdin=subprocess.DEVNULL,
             stdout=log,
             stderr=subprocess.STDOUT,
             env=env,
@@ -373,6 +374,7 @@ def run_nek(conf: Mapping[str, Any], paths: RunPaths) -> None:
         proc = subprocess.run(
             cmd,
             cwd=str(paths.root),
+            stdin=subprocess.DEVNULL,
             stdout=log,
             stderr=subprocess.STDOUT,
             env=env,
