@@ -41,7 +41,11 @@ build:
     KTH_SOURCE_ROOT: ../KTH_Framework
   executable_name: nek5000
   output: data/dependencies/no_resize_lc/nek5000_channel
-  logfile: build.log
+  # Not build.log: the KTH makenek hardcodes build.log in its cwd, both deleting it
+  # (core/makenek.inc:102, :142) and appending to it (bin/makenek:59, `make -j4 |
+  # tee -a build.log`). Sharing the name means makenek unlinks the file nekstat is
+  # still writing to, so the nekstat log ends up on a dangling inode.
+  logfile: nekstat_build.log
   skip_if_exists: true
 
 source:

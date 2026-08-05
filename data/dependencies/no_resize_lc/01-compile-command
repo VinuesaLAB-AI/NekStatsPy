@@ -19,5 +19,11 @@ export PPLIST="${PPLIST:-}"
 export USR="frame.o mntrlog_block.o mntrlog.o mntrtmr_block.o mntrtmr.o rprm_block.o rprm.o io_tools_block.o io_tools.o pstat2D.o pstat2D_IO.o"
 export USR_LFLAGS="${USR_LFLAGS:-}"
 
-"${NEK_SOURCE_ROOT}/bin/makenek" clean || true
-"${NEK_SOURCE_ROOT}/bin/makenek" "${CASE_NAME}"
+# makenek prompts on stdin ("cleanup/rebuild all 3rd party dependencies too? [N]",
+# core/makenek.inc:131 and :630). nekstat runs this non-interactively with stdout
+# redirected to a log, so the prompt is invisible and the build blocks forever.
+# Answer the default (N: keep the prebuilt BLAS/gslib/etc.) on stdin. Use `echo N`
+# rather than `< /dev/null`: nekconfig runs under `set -e`, so a read hitting EOF
+# returns 1 and aborts the script before `make clean`.
+echo N | "${NEK_SOURCE_ROOT}/bin/makenek" clean || true
+echo N | "${NEK_SOURCE_ROOT}/bin/makenek" "${CASE_NAME}"
