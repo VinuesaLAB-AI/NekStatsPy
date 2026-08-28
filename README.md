@@ -83,8 +83,8 @@ nekstat validate-channel --mine channel_python.mat --ref matlab_reference.mat
 # process int_fld -> stat .mat   (defaults to the bundled sample case)
 nekstat post --nek data --mesh data/int_mesh.mat --out stat.mat
 
-# (re)generate the interpolation mesh and check it against int_mesh.mat
-nekstat mesh --ref data/int_mesh.mat
+# generate a complete mesh artifact set and check it against the 4412 reference
+nekstat mesh configs/mesh_naca4412_reference.yml --ref data/int_mesh.mat
 
 # plot the three figure categories for one dataset
 nekstat plot --mat stat.mat --figdir figs
@@ -140,8 +140,9 @@ same `int_fld`), every quantity agrees to float64 round-off:
 | uu | 3×10⁻¹⁸ | β / Reθ | 4×10⁻¹⁴ / 1×10⁻¹² |
 | TKE budget terms | ~1×10⁻¹⁶ | Reτ / H₁₂ | 3×10⁻¹⁴ / 1×10⁻¹⁵ |
 
-The interpolation mesh generator reproduces `int_mesh.mat` to ~1×10⁻⁹ and its
-Fortran `x.fort`/`y.fort` writer is byte-exact.
+The interpolation mesh generator reproduces the reference coordinates to below
+`1×10⁻⁸`; its Fortran writer is checked by decoding `x.fort`/`y.fort` and
+comparing every coordinate to the generated `.mat` metadata.
 
 Overlay figures (MATLAB reference = lines, Python port = markers):
 
@@ -227,7 +228,7 @@ The main config fields are:
 | `run` | run name and root folder, e.g. `runs/naca_wing_XXX` |
 | `case` | case id, Nek session name, dependency folder, executable |
 | `build` | solver archive, local MPI environment script, compile command, output executable |
-| `mesh` | where to get `ZSTAT/x.fort` and `ZSTAT/y.fort`, or generate them |
+| `mesh` | copy or generate `ZSTAT/x.fort`, `ZSTAT/y.fort`, and matching mesh metadata |
 | `source` | source result tree, glob, and 1-based window over sorted `sts*` files |
 | `nek` | MPI launch settings and `.rea` parameter overrides |
 | `post` | existing Python `int_fld -> stat_*.mat` options |
@@ -332,17 +333,49 @@ wall-unit velocity and Reynolds-stress profiles used for the channel case:
 
 ## Mesh generation
 
-`nekstat mesh` / `nekstat.build_mesh()` reproduce the NACA-4412 wall-normal
-interpolation mesh (83 chordwise stations × 190 wall-normal points) and write the
-little-endian Fortran-record `x.fort` / `y.fort` that Nek5000 reads. The committed
-mesh uses leading-edge clustering to `x/c = 0.295` with uniform spacing
-`dx = 0.01625` thereafter.
+`nekstat mesh <config.yml>` generates a self-consistent artifact set: the
+little-endian Fortran-record `ZSTAT/x.fort` / `y.fort` Nek inputs, the matching
+`int_mesh.mat` Python metadata, a mesh image, and a checksum manifest. The
+standalone example is `configs/mesh_naca4412_reference.yml`.
+`configs/mesh_naca0012_reference.yml` and `configs/mesh_farfield.yml` show the
+symmetric-profile and coordinate-only Cartesian forms respectively.
 
-The NACA0012 workflow currently uses the supplied mesh files in
-`data/meshes/naca0012/`: `ZSTAT/x.fort`, `ZSTAT/y.fort`, and `int_mesh.mat`.
-That mesh has 80 profiles per side, 857 wall-normal points, and 137120 total
-interpolation points. The symmetric-airfoil generated-mesh path is tracked in
-`docs/naca0012_re200k_open_issue.md`.
+The generator provides these compatibility presets:
+
+- `naca4412_reference`: the committed NACA4412 mesh (83 stations × 190
+  wall-normal points, 31,540 points total), clustered to `x/c=0.295` with
+  `dx=0.01625` thereafter.
+- `naca4412_script_current`: the currently uncommented legacy MATLAB settings
+  (`x/c=0.395`, `dx=0.015`), which intentionally produce a different mesh.
+- `naca0012_reference`: the supplied NACA0012 mesh (80 × 857, 137,120 points).
+
+The generated reference coordinates agree with the bundled MATLAB assets to
+better than `1e-8`; their `.fort` files are decoded and checked against their
+generated `.mat` coordinates in the test suite. NACA00xx now uses an explicit
+symmetric-airfoil geometry branch.
+
+For a full Nek run, set `mesh.mode: generate`, choose a preset or parameters,
+and use `post.mesh: auto`. The run preparer then writes the `.fort` files and
+the exact matching `.mat` file into its run directory. Coordinate-only
+`kind: cartesian` meshes are available for far-field/control-volume sampling,
+but are deliberately rejected by profile post-processing and Cl/Cd integration.
+Use `extrusion: vertical` with `kind: wall_normal_profile` to reproduce the
+legacy no-rotation profile sampling convention.
+
+`configs/naca4412_mesh_recommended.yml` records a six-file force-comparison
+mesh selected by the documented sensitivity study in
+`docs/mesh_optimization_test_log.md`. It is a short-window benchmark candidate,
+not a replacement for convergence over a production-length averaging interval.
+
+```yaml
+mesh:
+  mode: generate
+  preset: naca4412_reference
+  output:
+    write_figure: false
+post:
+  mesh: auto
+```
 
 ## Relation to the original MATLAB code
 
