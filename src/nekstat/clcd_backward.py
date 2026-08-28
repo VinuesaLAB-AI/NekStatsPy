@@ -18,7 +18,7 @@ import struct
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import scipy.io as sio
@@ -185,8 +185,43 @@ def run_clcd_backward_from_config(
         write_manifest(paths.manifest, windows, paths.int_fld_dir, paths.log_dir, {}, {})
         return paths
 
+    mesh_file, aoa_deg = _clcd_mesh_settings(work_conf, paths)
+    block_rows: List[Dict[str, Any]] = []
+    block_averages: List[_BlockAverage] = []
+
+    # Publish a readable report before Nek starts.  Each replacement below is
+    # atomic, so an observer sees either the prior complete report or the next
+    # complete report, never a partially written CSV.
+    _atomic_write_csv(paths.block_csv, _block_csv_fields(), block_rows)
+
+    def record_completed_block(
+        window: BackwardWindow,
+        status: str,
+        header: IntFldHeader,
+        int_fld_path: Path,
+    ) -> None:
+        block = _block_average_from_int_fld(
+            window,
+            header,
+            status,
+            int_fld_path,
+            mesh_file,
+            aoa_deg,
+        )
+        block_averages.append(block)
+        block_rows.append(_block_row(block))
+        _atomic_write_csv(paths.block_csv, _block_csv_fields(), block_rows)
+
     if skip_nek:
         statuses, headers = validate_existing_windows(windows, paths.int_fld_dir)
+        for window in windows:
+            int_fld_path = paths.int_fld_dir / f"int_fld_{window_stem(window)}"
+            record_completed_block(
+                window,
+                statuses[window.window_index],
+                headers[window.window_index],
+                int_fld_path,
+            )
     else:
         statuses, headers = run_nek_windows(
             work_conf,
@@ -195,9 +230,18 @@ def run_clcd_backward_from_config(
             paths.int_fld_dir,
             paths.log_dir,
             force=requested_force,
+            on_completed=record_completed_block,
         )
     write_manifest(paths.manifest, windows, paths.int_fld_dir, paths.log_dir, statuses, headers)
-    write_clcd_tables(work_conf, paths, windows, statuses, headers)
+    write_clcd_tables(
+        work_conf,
+        paths,
+        windows,
+        statuses,
+        headers,
+        block_rows=block_rows,
+        block_averages=block_averages,
+    )
 
     if requested_discard:
         discard_int_fld_files(windows, paths.int_fld_dir)
@@ -449,8 +493,14 @@ def run_nek_windows(
     log_dir: Path,
     *,
     force: bool = False,
+    on_completed: Optional[Callable[[BackwardWindow, str, IntFldHeader, Path], None]] = None,
 ) -> Tuple[Dict[int, str], Dict[int, IntFldHeader]]:
-    """Generate or reuse one ``int_fld`` per backward window."""
+    """Generate or reuse one ``int_fld`` per backward window.
+
+    ``on_completed`` runs after each validated result is available at its final
+    destination, including reused results.  It is intentionally called before
+    the next Nek block starts so callers can publish incremental diagnostics.
+    """
 
     case_conf = _section(conf, "case")
     session = str(case_conf.get("session", "case"))
@@ -468,6 +518,13 @@ def run_nek_windows(
         if destination.exists() and not force:
             headers[window.window_index] = validate_int_fld_for_window(destination, window)
             statuses[window.window_index] = "reused"
+            if on_completed:
+                on_completed(
+                    window,
+                    statuses[window.window_index],
+                    headers[window.window_index],
+                    destination,
+                )
             continue
 
         patch_rea_params(
@@ -489,6 +546,8 @@ def run_nek_windows(
         os.replace(generated, destination)
         headers[window.window_index] = header
         statuses[window.window_index] = "generated"
+        if on_completed:
+            on_completed(window, statuses[window.window_index], header, destination)
 
     return statuses, headers
 
@@ -708,25 +767,24 @@ def write_clcd_tables(
     windows: Sequence[BackwardWindow],
     statuses: Mapping[int, str],
     headers: Mapping[int, IntFldHeader],
+    *,
+    block_rows: Optional[Sequence[Mapping[str, Any]]] = None,
+    block_averages: Optional[Sequence[_BlockAverage]] = None,
 ) -> Path:
     """Compute block Cl/Cd rows and duration-weighted backward averages."""
 
-    clcd_conf = _section(conf, "clcd_backward")
-    post_conf = _section(conf, "post")
-    mesh = clcd_conf.get("mesh") or post_conf.get("mesh")
-    if not mesh:
-        raise ValueError("clcd_backward.mesh or post.mesh is required")
-    mesh_file = _resolve_path(mesh, paths.root, _repo_root(paths.root))
-    aoa_deg = float(clcd_conf.get("aoa_deg", post_conf.get("aoa_deg", 5.0)))
-
-    block_rows, block_averages = _compute_block_rows(
-        windows,
-        paths,
-        statuses,
-        headers,
-        mesh_file,
-        aoa_deg,
-    )
+    if (block_rows is None) != (block_averages is None):
+        raise ValueError("block_rows and block_averages must be provided together")
+    if block_rows is None:
+        mesh_file, aoa_deg = _clcd_mesh_settings(conf, paths)
+        block_rows, block_averages = _compute_block_rows(
+            windows,
+            paths,
+            statuses,
+            headers,
+            mesh_file,
+            aoa_deg,
+        )
     _atomic_write_csv(paths.block_csv, _block_csv_fields(), block_rows)
     backward_rows = _compute_backward_rows(block_averages)
     _atomic_write_csv(paths.csv, _backward_csv_fields(), backward_rows)
@@ -761,21 +819,54 @@ def _compute_block_rows(
             int_fld_path,
             window,
         )
-        coeffs = compute_clcd_from_int_fld(int_fld_path, mesh_file, aoa_deg=aoa_deg)
-        block = _BlockAverage(
-            window=window,
-            header=header,
-            coeffs=coeffs,
-            status=statuses.get(window.window_index, ""),
-            int_fld_path=int_fld_path,
+        block = _block_average_from_int_fld(
+            window,
+            header,
+            statuses.get(window.window_index, ""),
+            int_fld_path,
+            mesh_file,
+            aoa_deg,
         )
-        if block.duration <= 0:
-            raise ValueError(
-                f"{int_fld_path}: non-positive block duration {block.duration:.16g}"
-            )
         averages.append(block)
         rows.append(_block_row(block))
     return rows, averages
+
+
+def _clcd_mesh_settings(
+    conf: Mapping[str, Any],
+    paths: ClCdBackwardPaths,
+) -> Tuple[Path, float]:
+    clcd_conf = _section(conf, "clcd_backward")
+    post_conf = _section(conf, "post")
+    mesh = clcd_conf.get("mesh") or post_conf.get("mesh")
+    if not mesh:
+        raise ValueError("clcd_backward.mesh or post.mesh is required")
+    mesh_file = _resolve_path(mesh, paths.root, _repo_root(paths.root))
+    aoa_deg = float(clcd_conf.get("aoa_deg", post_conf.get("aoa_deg", 5.0)))
+    return mesh_file, aoa_deg
+
+
+def _block_average_from_int_fld(
+    window: BackwardWindow,
+    header: IntFldHeader,
+    status: str,
+    int_fld_path: Path,
+    mesh_file: Path,
+    aoa_deg: float,
+) -> _BlockAverage:
+    coeffs = compute_clcd_from_int_fld(int_fld_path, mesh_file, aoa_deg=aoa_deg)
+    block = _BlockAverage(
+        window=window,
+        header=header,
+        coeffs=coeffs,
+        status=status,
+        int_fld_path=int_fld_path,
+    )
+    if block.duration <= 0:
+        raise ValueError(
+            f"{int_fld_path}: non-positive block duration {block.duration:.16g}"
+        )
+    return block
 
 
 def _block_csv_fields() -> Tuple[str, ...]:

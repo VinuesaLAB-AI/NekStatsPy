@@ -286,7 +286,7 @@ The run folder contains:
 ```text
 runs/naca_wing_clcd_backward/
 ├── <run.name>_clcd_blocks.csv
-│                          # one short-window Cl/Cd row per Nek block
+│                          # updated atomically after each finished Nek block
 ├── <run.name>_clcd_backward.csv
 │                          # duration-weighted backward averages over blocks
 ├── nek_windows.csv         # planned/generated/reused Nek block windows
@@ -299,8 +299,11 @@ runs/naca_wing_clcd_backward/
 Existing valid per-block `int_fld` files are reused unless `--force` or
 `clcd_backward.force: true` is set. `--skip-nek` recomputes the CSVs from existing
 `int_fld` snapshots. `--discard-int-fld` removes those snapshots after the CSV is
-written. The coefficient extraction is pure Python and reads only the records
-needed for Cl/Cd: `F4` and `D1-D4`.
+written. The block CSV is created with its header before Nek starts, then atomically
+rewritten with one additional row immediately after every generated or reused block;
+it therefore remains safe to inspect while a later block is running. The coefficient
+extraction is pure Python and reads only the records needed for Cl/Cd: `F4` and
+`D1-D4`.
 
 ### KTH channel workflow
 
