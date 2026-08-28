@@ -46,21 +46,25 @@ patches `p068` from the matched source files. When `first_file` is greater than
 `first_file` is 1, update `nek.initial_start_time` if the production data starts
 at a different physical time.
 
-## Remaining Backend Issue
+## Generated-Mesh Support
 
-`nekstat.naca_geom.build_mesh("NACA0012")` is still not production-ready.
-The current Python generator is tuned for the NACA4412 mesh and `naca_prof2()`
-does not yet handle the symmetric-profile `p=0` case. Also, `mesh.mode:
-generate` does not expose the NACA0012 sampling controls from
-`tmp/00_GenProfile/A1_create_int_mesh_wing.m`, including:
+The generated-mesh backend now supports the symmetric NACA0012 case through
+the `naca0012_reference` preset. It explicitly handles the `p=0` symmetric
+profile rather than following the `0/0` camber calculation in the legacy
+MATLAB `naca_prof2.m` implementation.
 
-- `yn = 0.12`
-- `r = 1.002`
-- `nle = 40`
-- `dx = 0.6 / nle`
-- leading-edge transition location `xn = 0.395` in
-  `create_profiles_wing_testbudget.m`
+The preset exposes the archived sampling fingerprint:
 
-For now, use `mesh.mode: copy` with the supplied mesh assets. A later backend
-upgrade can generalize symmetric NACA profile generation and expose those mesh
-sampling parameters in config.
+- `target_extent = 0.12`
+- `growth_ratio = 1.002`
+- `leading_edge_count = 40`
+- `uniform_dx = 0.015` (`0.6 / 40`)
+- `transition_x = 0.395`
+
+Use `nekstat mesh configs/mesh_naca0012_reference.yml` to produce a matching
+artifact directory, or set `mesh.mode: generate`, `mesh.preset:
+naca0012_reference`, and `post.mesh: auto` in a full run configuration. The
+generated coordinates agree with the supplied MATLAB asset within `1e-8` and
+the generated Fortran coordinates are tested against their generated `.mat`
+metadata. The existing copy-mode run template remains supported for archived
+workflows.
