@@ -1,7 +1,7 @@
 """Command-line interface: ``nekstat <build|run|post|mesh|plot|validate>``."""
 
-import os
 import argparse
+from pathlib import Path
 
 import numpy as np
 
@@ -23,19 +23,81 @@ def _cmd_post(args):
 
 
 def _cmd_mesh(args):
-    from .naca_geom import build_mesh, save_inter_mesh
+    from .naca_geom import (
+        InterpolationMesh,
+        MeshCapabilities,
+        build_mesh,
+        build_mesh_from_spec,
+        write_mesh_artifacts,
+    )
     import scipy.io as sio
-    x_pts, y_pts, npoints, yn, alphau, alphal, xc = build_mesh(tol=args.tol)
-    print(f"[mesh] {npoints} points, {len(xc)} stations x {len(yn)} wall-normal")
-    if args.ref:
-        r = sio.loadmat(args.ref)
-        m = r["x_pts"].ravel() != -1
-        print(f"       max|dx vs ref|={np.max(np.abs(x_pts[m]-r['x_pts'].ravel()[m])):.2e}"
-              f"  max|dalphau|={np.max(np.abs(alphau-r['alphau'].ravel())):.2e}")
-    if args.write_into:
-        os.makedirs(os.path.join(args.write_into, "ZSTAT"), exist_ok=True)
-        save_inter_mesh(args.write_into, npoints, x_pts, y_pts)
-        print(f"       wrote {args.write_into}/ZSTAT/x.fort,y.fort")
+    if args.config:
+        from .nek5000 import load_config
+
+        config_path = Path(args.config).resolve()
+        conf = load_config(config_path)
+        mesh_conf = conf.get("mesh", conf)
+        if not isinstance(mesh_conf, dict):
+            raise ValueError("mesh configuration must be a mapping")
+        mesh = build_mesh_from_spec(mesh_conf)
+        output_conf = mesh_conf.get("output") or {}
+        output = args.out or output_conf.get("directory") or args.write_into
+        if not output:
+            raise ValueError("mesh.output.directory or --out is required when a config is supplied")
+        output_path = Path(output)
+        if not output_path.is_absolute():
+            output_path = config_path.parent / output_path
+        write_figure = False if args.no_figure else bool(output_conf.get("write_figure", True))
+        artifacts = write_mesh_artifacts(
+            mesh,
+            output_path,
+            spec=mesh_conf,
+            mat_file=str(output_conf.get("mat_file", "int_mesh.mat")),
+            write_figure=write_figure,
+            figure_file=str(output_conf.get("figure_file", "mesh.png")),
+            manifest_file=str(output_conf.get("manifest_file", "mesh_manifest.yml")),
+        )
+        print(f"[mesh] wrote {artifacts.root}")
+        print(f"       Nek: {artifacts.x_fort.relative_to(artifacts.root)}, {artifacts.y_fort.relative_to(artifacts.root)}")
+        print(f"       MATLAB: {artifacts.mat_file.relative_to(artifacts.root)}")
+    else:
+        x_pts, y_pts, _, yn, alphau, alphal, xc = build_mesh(tol=args.tol)
+        mesh = InterpolationMesh(
+            x_pts=x_pts,
+            y_pts=y_pts,
+            kind="wall_normal_profile",
+            capabilities=MeshCapabilities(profile_post=True, clcd=True),
+            yn=yn,
+            alphau=alphau,
+            alphal=alphal,
+            xc=xc,
+            preset="naca4412_reference",
+        )
+        if args.out or args.write_into:
+            artifacts = write_mesh_artifacts(
+                mesh, args.out or args.write_into, write_figure=not args.no_figure,
+            )
+            print(f"[mesh] wrote {artifacts.root}")
+
+    if mesh.is_profile_mesh:
+        print(f"       {mesh.npoints} points, {len(mesh.xc)} stations x {len(mesh.yn)} wall-normal")
+    else:
+        print(f"       {mesh.npoints} Cartesian points")
+    ref = args.ref if args.ref else (_default("mesh") if not args.config else None)
+    if ref:
+        reference = sio.loadmat(ref)
+        differences = []
+        for field in ("x_pts", "y_pts", "alphau", "alphal", "yn", "xc"):
+            mine, theirs = mesh.mat_dict().get(field), reference.get(field)
+            if mine is None or theirs is None:
+                continue
+            mine, theirs = mine.ravel(), np.asarray(theirs).ravel()
+            if mine.shape != theirs.shape:
+                raise ValueError(f"reference field {field} has shape {theirs.shape}, expected {mine.shape}")
+            differences.append((field, float(np.max(np.abs(mine - theirs)))))
+        print("       reference max absolute differences: " + ", ".join(
+            f"{field}={value:.2e}" for field, value in differences
+        ))
 
 
 def _cmd_plot(args):
@@ -253,10 +315,13 @@ def main(argv=None):
                      help="write the .mat output without regenerating figures")
     sch.set_defaults(func=_cmd_channel_post)
 
-    sm = sub.add_parser("mesh", help="generate x.fort/y.fort interpolation mesh")
+    sm = sub.add_parser("mesh", help="generate interpolation mesh artifacts from YAML")
+    sm.add_argument("config", nargs="?", help="YAML file (full run config or mesh-only config)")
     sm.add_argument("--tol", type=float, default=0.5e-7)
-    sm.add_argument("--ref", default=_default("mesh"), help="int_mesh.mat to validate against")
-    sm.add_argument("--write-into", default=None, help="dir with ZSTAT/ to write into")
+    sm.add_argument("--ref", default=None, help="int_mesh.mat to validate against")
+    sm.add_argument("--out", default=None, help="override mesh.output.directory")
+    sm.add_argument("--write-into", default=None, help="legacy alias for --out")
+    sm.add_argument("--no-figure", action="store_true", help="do not write mesh.png")
     sm.set_defaults(func=_cmd_mesh)
 
     spl = sub.add_parser("plot", help="plot one processed .mat")

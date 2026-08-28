@@ -22,7 +22,17 @@ from .result import Result
 from .read_intfld import read_data_profiles
 from .postproc import load_prof_data
 from .export import export_drag_decomposition, save_Re200k
-from .naca_geom import build_mesh, save_inter_mesh
+from .naca_geom import (
+    InterpolationMesh,
+    MeshArtifacts,
+    MeshCapabilities,
+    available_presets,
+    build_mesh,
+    build_mesh_from_spec,
+    save_inter_mesh,
+    validate_mesh,
+    write_mesh_artifacts,
+)
 from ._data import data_path, sample_paths
 from .nek5000 import (
     BuildPaths,
@@ -69,7 +79,9 @@ __all__ = [
     "load_mesh", "process", "run", "load_result", "Result",
     "read_data_profiles", "load_prof_data",
     "export_drag_decomposition", "save_Re200k",
-    "build_mesh", "save_inter_mesh",
+    "InterpolationMesh", "MeshArtifacts", "MeshCapabilities",
+    "available_presets", "build_mesh", "build_mesh_from_spec",
+    "save_inter_mesh", "validate_mesh", "write_mesh_artifacts",
     "BuildPaths", "RunPaths", "StsHeader", "StsFile",
     "build_from_config", "build_solver",
     "load_config", "prepare_run", "read_sts_header", "read_sts_header_info",

@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 import yaml
 
-from .naca_geom import build_mesh, save_inter_mesh
+from .naca_geom import build_mesh_from_spec, validate_mesh, write_mesh_artifacts
 from .pipeline import run as run_post
 
 __all__ = [
@@ -395,7 +395,10 @@ def run_python_post(conf: Mapping[str, Any], paths: RunPaths):
     if not mesh:
         raise ValueError("post.mesh is required for Python post-processing")
 
-    mesh_file = _resolve_path(mesh, paths.root, _repo_root(paths.root))
+    if str(mesh).lower() == "auto":
+        mesh_file = _generated_mesh_file(conf, paths.root)
+    else:
+        mesh_file = _resolve_path(mesh, paths.root, _repo_root(paths.root))
     out_file = post_conf.get("out", "stat.mat")
     out_path = _resolve_under(out_file, paths.root)
     return run_post(
@@ -544,8 +547,20 @@ def _stage_interpolation_mesh(
     zstat_dir = run_dir / "ZSTAT"
 
     if mode == "generate":
-        x_pts, y_pts, npoints, *_ = build_mesh(tol=float(mesh_conf.get("tol", 0.5e-7)))
-        save_inter_mesh(str(run_dir), npoints, x_pts, y_pts)
+        mesh = build_mesh_from_spec(mesh_conf)
+        post_mesh = _section(conf, "post").get("mesh")
+        if str(post_mesh).lower() == "auto":
+            validate_mesh(mesh, require="profile_post")
+        output_conf = _section(mesh_conf, "output")
+        write_mesh_artifacts(
+            mesh,
+            run_dir,
+            spec=mesh_conf,
+            mat_file=str(output_conf.get("mat_file", "int_mesh.mat")),
+            write_figure=bool(output_conf.get("write_figure", False)),
+            figure_file=str(output_conf.get("figure_file", "mesh.png")),
+            manifest_file=str(output_conf.get("manifest_file", "mesh_manifest.yml")),
+        )
         return
 
     if mode != "copy":
@@ -561,6 +576,22 @@ def _stage_interpolation_mesh(
             mode=stage_mode,
             overwrite=overwrite,
         )
+
+
+def _generated_mesh_file(conf: Mapping[str, Any], run_dir: Path) -> Path:
+    """Return the in-run MATLAB mesh created by ``mesh.mode: generate``."""
+
+    mesh_conf = _section(conf, "mesh")
+    if str(mesh_conf.get("mode", "copy")).lower() != "generate":
+        raise ValueError("post.mesh: auto requires mesh.mode: generate")
+    output_conf = _section(mesh_conf, "output")
+    filename = Path(str(output_conf.get("mat_file", "int_mesh.mat")))
+    if filename.is_absolute() or ".." in filename.parts:
+        raise ValueError("mesh.output.mat_file must be a path below the run directory")
+    mesh_file = run_dir / filename
+    if not mesh_file.is_file():
+        raise FileNotFoundError(f"generated mesh metadata is missing: {mesh_file}")
+    return mesh_file
 
 
 def _patch_rea_if_present(
