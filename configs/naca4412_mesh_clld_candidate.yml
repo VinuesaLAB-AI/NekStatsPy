@@ -1,0 +1,58 @@
+# Best stable Cl/L-D trade-off from the follow-up search in
+# docs/mesh_optimization_test_log.md. It improves L/D to about 2% deviation on
+# the six-file window; the remaining Cl difference is sampling-window limited.
+
+run:
+  name: naca4412_mesh_clld_candidate
+  root: runs
+case:
+  id: naca4412
+  session: naca_wing
+  dependencies: data/dependencies/naca4412
+  executable: data/dependencies/naca4412/nek5000_4412
+  stage_mode: copy
+  executable_stage_mode: copy
+  overwrite: true
+mesh:
+  mode: generate
+  preset: naca4412_reference
+  chordwise:
+    transition_x: 0.31
+    leading_edge_count: 80
+    uniform_dx: 0.0147
+    include_trailing_edge: false
+  overwrite: true
+  output:
+    write_figure: false
+    directory: data/mesh/naca4412_mesh_clld_candidate
+source:
+  path: /home/yuninw/codes/post_process/nekpost/stats/naca4412/sts_data/benchmark
+  pattern: stsnaca_wing0.f*
+  stage_mode: symlink
+  first_file: 1
+  last_file: 6
+  overwrite: true
+nek:
+  np: 1
+  mpirun: mpirun
+  env_script: ~/.bashrc.openmpi_ucx
+  executable_name: ./nek5000
+  logfile: logfile
+  sampling_start_time: auto
+  initial_start_time: 4.425170000013
+  allow_first_file_end_time_as_start: false
+  output_dir: A0
+  clear_a0: true
+  clear_sch: true
+  remove_existing_int_fld: true
+  remove_logfile: true
+  require_int_fld: true
+  completion_marker: Output interporlated field in int_fld
+  abort_marker: "ABORT:"
+post:
+  mesh: auto
+  out: stat_naca4412_mesh_clld_candidate.mat
+  istart: 25
+  iend: 80
+  long: 1
+  aoa_deg: 5.0
