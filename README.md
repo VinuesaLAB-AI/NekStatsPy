@@ -35,17 +35,45 @@ int_fld + int_mesh.mat                     (this package)
 
 ## Install
 
+### Python virtual environment
+
+From a repository clone, run the following in its root directory (the directory
+containing `pyproject.toml`):
+
 ```bash
-pip install git+https://github.com/yuning-w/nekstat.git
-# or, from a clone (editable, for development):
 git clone https://github.com/yuning-w/nekstat.git
-cd nekstat && pip install -e .
+cd nekstat
+# If you already have a clone, start here from that directory.
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e .
+python -m pip check
+nekstat --help
 ```
 
-Requires Python ≥ 3.8, NumPy, SciPy, Matplotlib (pulled in automatically). The
-sample dataset lives in the repository under `data/` (it is intentionally not
-bundled into the wheel because `int_fld` is ~33 MB) — use a clone to run the
-examples, or point the tools at your own Nek output.
+The package declares Python ≥ 3.8. `pip install -e .` installs all Python runtime
+dependencies from `pyproject.toml`: NumPy ≥ 1.20, SciPy ≥ 1.6, Matplotlib ≥ 3.3,
+and PyYAML ≥ 5.1. No separate requirements file or `mpi4py` is needed. If
+`python3 -m venv` reports that venv/ensurepip is unavailable, install your
+distribution's venv support for that Python interpreter (for example,
+`python3-venv` on Debian/Ubuntu), or use a site-provided Python with venv support.
+
+For development/tests, install `python -m pip install -e '.[dev]'` to include
+pytest. In each new shell, return to the clone and run
+`source .venv/bin/activate`; use `deactivate` to leave the environment. On a
+headless compute node, `export MPLBACKEND=Agg` selects file-only plotting.
+
+For a package-only installation, use
+`python -m pip install git+https://github.com/yuning-w/nekstat.git` inside the
+activated environment instead. The sample dataset and case assets live in the
+repository under `data/` (they are intentionally not bundled into the wheel
+because `int_fld` is ~33 MB), so use a clone for the examples and build workflows.
+
+Python-only processing of an existing `int_fld` needs no MPI, Fortran compiler,
+or MATLAB. Building and running the Nek interpolation stage additionally needs
+the case's solver source archive, Bash, Make, C/Fortran compilers, and an MPI
+installation with compiler wrappers and a launcher; pip does not install these.
 
 ## Quick start
 
@@ -60,6 +88,9 @@ nekstat run configs/naca0012_post.yml
 # run blockwise windows and write Python-only Cl/Cd convergence CSVs
 nekstat clcd-backward configs/naca4412_post.yml
 nekstat clcd-backward configs/naca0012_post.yml
+
+# independent control-volume momentum-balance check (same backward workflow)
+nekstat backward-clcd configs/naca4412_control_volume_long_cycle.yml
 
 # stage a run folder without launching Nek or Python post-processing
 nekstat run configs/naca4412_post.yml --prepare-only
@@ -191,18 +222,66 @@ The original Nek solver archive is preserved in `tmp/Nek1093_dong.tar.gz` for
 portable rebuilds; the config-driven run path uses the precompiled executable in
 `data/dependencies/naca4412/nek5000_4412`.
 
-For a new machine or MPI stack, edit the config's `build.env_script` if needed
-and run:
+### Build with your local MPI environment
+
+`~/.bashrc.openmpi_ucx` is a machine-specific environment setup script, not a
+nekstat requirement. To use your current environment, first load your site's
+matching compiler/MPI modules or set `PATH` and library paths for your local MPI
+installation. Then edit the existing sections of your chosen config:
+
+```yaml
+build:
+  env_script: null
+  # Keep the other build fields from the case template.
+nek:
+  env_script: null
+  mpirun: mpirun
+  # Keep the other runtime fields from the case template.
+```
+
+Omitting `env_script` has the same effect as YAML `null`: the subprocess inherits
+the environment of the shell running `nekstat`. Set this for both build and run
+if either specifies a script; the channel template specifies it in both places.
+Alternatively, point both fields at your own environment script (prefer an
+absolute path). The build script's environment is local to that subprocess and
+does not carry over automatically to a later Nek run.
+
+Check that the required wrappers and launcher are available, then rebuild:
 
 ```bash
+command -v mpif90 mpicc mpirun     # airfoil cases
+# command -v mpifort mpicc mpirun  # KTH channel case
 nekstat build configs/naca4412_post.yml --rebuild
+# Other case templates:
+# nekstat build configs/naca0012_post.yml --rebuild
+# nekstat build configs/channel_lc_post.yml --rebuild
 ```
 
 This extracts `tmp/Nek1093_dong.tar.gz` into `tmp/Nek1093_dong` when needed,
-stages the compile work directory from `data/dependencies/naca4412`, sources the
-configured environment script, runs the case compile command in the configured
-`build.work_dir`, and installs the resulting executable at the configured
-`build.output` path.
+stages the compile work directory from `data/dependencies/naca4412`, runs the
+case compile command in `build.work_dir`, and installs the resulting executable
+at `build.output`. An environment script is sourced only if configured. Make
+sure the archive named by `build.archive` is available, or provide the extracted
+source tree at `build.source_dir`; these solver sources are not installed by pip.
+
+Use the same compiler/MPI installation to build and run. `--rebuild` is needed
+when changing stacks because existing executables are otherwise skipped by
+default. `nek.mpirun` can also be an absolute launcher path; it is invoked as
+`mpirun -n <np> <executable>`. After setting your input paths and averaging window,
+`nekstat run configs/naca4412_post.yml --build --rebuild` builds and runs in one
+command.
+
+The bundled airfoil compile scripts set `F77="mpif90 -std=legacy"` and
+`CC="mpicc"`; these names resolve through your local `PATH`. They assume GNU
+Fortran-compatible flags. For different wrapper names or compiler families,
+edit `data/dependencies/naca4412/compile-script` or
+`data/dependencies/naca0012/makenek` and adjust compiler flags for that compiler.
+The channel entry point, `data/dependencies/no_resize_lc/01-compile-command`,
+sets `FC` to `mpifort` plus the KTH include flags and defaults `CC` to `mpicc`.
+Setting `build.env.F77`/`FC` alone cannot override assignments hardcoded in these
+scripts. Edit the dependency templates, since build staging can overwrite edits
+made directly in `tmp/*_compile`. Other compiler families have not been validated
+by this setup recipe.
 
 When `nek.sampling_start_time` is omitted or set to `auto`, `nekstat` reads the
 132-byte header of the preceding `sts` file and uses that end time for Nek
@@ -302,8 +381,54 @@ Existing valid per-block `int_fld` files are reused unless `--force` or
 written. The block CSV is created with its header before Nek starts, then atomically
 rewritten with one additional row immediately after every generated or reused block;
 it therefore remains safe to inspect while a later block is running. The coefficient
-extraction is pure Python and reads only the records needed for Cl/Cd: `F4` and
-`D1-D4`.
+extraction is pure Python. The default surface method reads only `F4` and
+`D1-D4`; the optional control-volume method reads `F1`, `F2`, `F4`, `F5`,
+`F6`, and `F9` instead.
+
+#### Optional control-volume check
+
+The default `clcd_backward.method` is `surface`, which is the standard,
+wall-profile pressure-and-viscous-force calculation. Set
+`method: control_volume` only when an independent 2-D momentum-balance check
+is wanted. It is intentionally a mode of the existing backward workflow, not
+a separate general post-processing pipeline.
+
+The canonical example is
+`configs/naca4412_control_volume_long_cycle.yml`. Its mesh reproduces the
+paper's rectangle, and its `source` range keeps every available block before
+the desired backward row is selected. Do not pre-truncate `source` merely to
+obtain a late backward average.
+
+```yaml
+mesh:
+  mode: generate
+  kind: control_volume
+  cartesian:
+    x: {start: -0.25, stop: 1.25, spacing: 0.0025}
+    y: {start: -0.25, stop: 0.25, spacing: 0.0025}
+  output:
+    mat_file: int_mesh.mat
+    write_figure: false
+
+clcd_backward:
+  method: control_volume
+  mesh: auto
+  block_mode: accumulator_reset
+  # Keep source.first_file/source.last_file as the full study range.
+```
+
+To modify the volume, change only the two Cartesian axes: `start`/`stop`
+change the four faces and `spacing` changes sampling resolution. Then rerun
+the full backward study and compare the same backward row. The control-volume
+CSV reports `Cl_convective`, `Cl_reynolds`, `Cl_pressure` and the analogous
+drag terms; `Cd_p` and `Cd_f` are intentionally `nan`, because they are
+surface-force decompositions, not control-volume terms.
+
+This method assumes a steady, two-dimensional balance and omits the viscous
+outer-boundary flux, as in the cited paper. Treat it as an uncertainty check
+against surface integration—not as a parameter to tune until rounded target
+coefficients are reproduced. The full rationale and convergence evidence are
+in `docs/mesh_long_horizon_search_log.md`.
 
 ### KTH channel workflow
 
@@ -360,8 +485,12 @@ symmetric-airfoil geometry branch.
 For a full Nek run, set `mesh.mode: generate`, choose a preset or parameters,
 and use `post.mesh: auto`. The run preparer then writes the `.fort` files and
 the exact matching `.mat` file into its run directory. Coordinate-only
-`kind: cartesian` meshes are available for far-field/control-volume sampling,
-but are deliberately rejected by profile post-processing and Cl/Cd integration.
+`kind: cartesian` meshes are available for far-field and control-volume
+sampling. They are rejected by profile post-processing and the default surface
+Cl/Cd integration, but are accepted when
+`clcd_backward.method: control_volume` is selected. Do not set `post.mesh:
+auto` for a Cartesian control-volume run: it has no wall-profile metadata and
+needs no Python `stat_*.mat` export.
 Use `extrusion: vertical` with `kind: wall_normal_profile` to reproduce the
 legacy no-rotation profile sampling convention.
 
