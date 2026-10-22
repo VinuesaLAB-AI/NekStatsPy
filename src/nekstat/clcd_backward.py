@@ -33,7 +33,7 @@ from .nek5000 import (
     prepare_run,
     run_nek,
 )
-from .nek5000 import _coerce_float, _repo_root, _resolve_path, _section
+from .nek5000 import _coerce_float, _generated_mesh_file, _repo_root, _resolve_path, _section
 from .read_intfld import _R_bot, _R_top, _rot_ten, read_header
 
 Pathish = Union[str, os.PathLike]
@@ -45,6 +45,7 @@ __all__ = [
     "ClCdCoefficients",
     "IntFldHeader",
     "build_backward_windows",
+    "compute_control_volume_clcd_from_int_fld",
     "compute_clcd_from_int_fld",
     "parse_int_fld_header",
     "run_clcd_backward_from_config",
@@ -98,6 +99,20 @@ class ClCdCoefficients:
     cd_p: float
     cd_f: float
     l_over_d: float
+    # Surface integration populates Cd_p and Cd_f.  Momentum-balance results
+    # instead expose their physical split below; keeping the former fields
+    # avoids changing the long-standing surface-workflow CSV contract.
+    method: str = "surface"
+    fx: float = math.nan
+    fy: float = math.nan
+    fx_balance: float = math.nan
+    fy_balance: float = math.nan
+    cl_convective: float = math.nan
+    cl_reynolds: float = math.nan
+    cl_pressure: float = math.nan
+    cd_convective: float = math.nan
+    cd_reynolds: float = math.nan
+    cd_pressure: float = math.nan
 
 
 @dataclass(frozen=True)
@@ -154,6 +169,7 @@ def run_clcd_backward_from_config(
     clcd_conf = _section(conf, "clcd_backward")
     if not clcd_conf:
         raise ValueError("clcd_backward section is required for this workflow")
+    method = _clcd_method(clcd_conf)
     csv_name = _clcd_csv_name(conf, clcd_conf, key="backward_csv", suffix="_clcd_backward")
     block_csv_name = _clcd_csv_name(conf, clcd_conf, key="block_csv", suffix="_clcd_blocks")
     work_conf = _backward_run_config(conf, clcd_conf, base_dir)
@@ -207,13 +223,18 @@ def run_clcd_backward_from_config(
             int_fld_path,
             mesh_file,
             aoa_deg,
+            method,
         )
         block_averages.append(block)
         block_rows.append(_block_row(block))
         _atomic_write_csv(paths.block_csv, _block_csv_fields(), block_rows)
 
     if skip_nek:
-        statuses, headers = validate_existing_windows(windows, paths.int_fld_dir)
+        statuses, headers = validate_existing_windows(
+            windows,
+            paths.int_fld_dir,
+            method=method,
+        )
         for window in windows:
             int_fld_path = paths.int_fld_dir / f"int_fld_{window_stem(window)}"
             record_completed_block(
@@ -231,6 +252,7 @@ def run_clcd_backward_from_config(
             paths.log_dir,
             force=requested_force,
             on_completed=record_completed_block,
+            method=method,
         )
     write_manifest(paths.manifest, windows, paths.int_fld_dir, paths.log_dir, statuses, headers)
     write_clcd_tables(
@@ -494,6 +516,7 @@ def run_nek_windows(
     *,
     force: bool = False,
     on_completed: Optional[Callable[[BackwardWindow, str, IntFldHeader, Path], None]] = None,
+    method: str = "surface",
 ) -> Tuple[Dict[int, str], Dict[int, IntFldHeader]]:
     """Generate or reuse one ``int_fld`` per backward window.
 
@@ -516,7 +539,11 @@ def run_nek_windows(
         destination_log = log_dir / f"nek_{stem}.log"
 
         if destination.exists() and not force:
-            headers[window.window_index] = validate_int_fld_for_window(destination, window)
+            headers[window.window_index] = validate_int_fld_for_window(
+                destination,
+                window,
+                method=method,
+            )
             statuses[window.window_index] = "reused"
             if on_completed:
                 on_completed(
@@ -542,7 +569,7 @@ def run_nek_windows(
                 shutil.copy2(paths.logfile, destination_log)
 
         generated = paths.zstat / "int_fld"
-        header = validate_int_fld_for_window(generated, window)
+        header = validate_int_fld_for_window(generated, window, method=method)
         os.replace(generated, destination)
         headers[window.window_index] = header
         statuses[window.window_index] = "generated"
@@ -555,6 +582,8 @@ def run_nek_windows(
 def validate_existing_windows(
     windows: Sequence[BackwardWindow],
     int_fld_dir: Path,
+    *,
+    method: str = "surface",
 ) -> Tuple[Dict[int, str], Dict[int, IntFldHeader]]:
     """Validate previously generated window files for a Nek-skipped run."""
 
@@ -564,7 +593,11 @@ def validate_existing_windows(
         path = int_fld_dir / f"int_fld_{window_stem(window)}"
         if not path.is_file():
             raise FileNotFoundError(f"Missing reusable int_fld for window: {path}")
-        headers[window.window_index] = validate_int_fld_for_window(path, window)
+        headers[window.window_index] = validate_int_fld_for_window(
+            path,
+            window,
+            method=method,
+        )
         statuses[window.window_index] = "reused"
     return statuses, headers
 
@@ -588,7 +621,12 @@ def parse_int_fld_header(path: Pathish) -> IntFldHeader:
     raise ValueError(f"{path}: invalid int_fld header ({'; '.join(failures)})")
 
 
-def validate_int_fld_for_window(path: Pathish, window: BackwardWindow) -> IntFldHeader:
+def validate_int_fld_for_window(
+    path: Pathish,
+    window: BackwardWindow,
+    *,
+    method: str = "surface",
+) -> IntFldHeader:
     """Validate one ``int_fld`` header against the requested time window."""
 
     path = Path(path)
@@ -606,10 +644,16 @@ def validate_int_fld_for_window(path: Pathish, window: BackwardWindow) -> IntFld
             f"{path}: header end time {header.end_time:.16g} does not match "
             f"last sts end {window.last_file_end_time:.16g}"
         )
-    if header.nstat < 4 or header.nderiv < 4:
+    method = _normalize_clcd_method(method)
+    if method == "surface" and (header.nstat < 4 or header.nderiv < 4):
         raise ValueError(
             f"{path}: Cl/Cd requires F4 and D1-D4, but header reports "
             f"nstat={header.nstat}, nderiv={header.nderiv}"
+        )
+    if method == "control_volume" and header.nstat < 9:
+        raise ValueError(
+            f"{path}: control-volume Cl/Cd requires F1, F2, F4, F5, F6, and F9, "
+            f"but header reports nstat={header.nstat}"
         )
     return header
 
@@ -704,6 +748,148 @@ def compute_clcd_from_int_fld(
     )
 
 
+def compute_control_volume_clcd_from_int_fld(
+    int_fld_path: Pathish,
+    mesh_file: Pathish,
+    *,
+    aoa_deg: float = 5.0,
+) -> ClCdCoefficients:
+    """Compute airfoil force from a rectangular control-volume momentum balance.
+
+    The sampling mesh must be a complete Cartesian tensor product, ordered as
+    generated by :mod:`nekstat.naca_geom` (all ``y`` values for each ``x``).
+    The balance follows the Appendix-2 mean-momentum and Reynolds-stress
+    terms.  With the mesh normal directed *out of the fluid control volume*,
+    the force experienced by the airfoil is
+
+    ``- integral[rho * U * (U . n) + rho * u'u' . n + p * n] ds``.
+
+    This exterior-volume convention is the one that closes against the
+    existing pressure-and-viscous surface force calculation; the paper's
+    displayed equation uses the opposite control-volume-force convention for
+    its first term.  Viscous stress is not part of the Appendix-2 equation and
+    is intentionally not added here.
+    """
+
+    mesh = sio.loadmat(mesh_file)
+    x_pts = np.asarray(mesh["x_pts"], dtype=float).ravel()
+    y_pts = np.asarray(mesh["y_pts"], dtype=float).ravel()
+    if len(x_pts) == 0 or len(x_pts) != len(y_pts):
+        raise ValueError("control-volume mesh coordinates must be non-empty and paired")
+    if np.any(~np.isfinite(x_pts)) or np.any(~np.isfinite(y_pts)):
+        raise ValueError("control-volume mesh coordinates must be finite")
+
+    x, y = np.unique(x_pts), np.unique(y_pts)
+    nx, ny = len(x), len(y)
+    if nx < 2 or ny < 2 or nx * ny != len(x_pts):
+        raise ValueError("control-volume mesh must contain a full Cartesian grid")
+    if not (
+        np.allclose(x_pts, np.repeat(x, ny))
+        and np.allclose(y_pts, np.tile(y, nx))
+    ):
+        raise ValueError(
+            "control-volume mesh must be ordered with y varying fastest for each x"
+        )
+
+    fields, header = _read_selected_fields(
+        Path(int_fld_path),
+        len(x_pts),
+        {1: "F1", 2: "F2", 4: "F4", 5: "F5", 6: "F6", 9: "F9"},
+    )
+    u = fields["F1"].reshape(nx, ny)
+    v = fields["F2"].reshape(nx, ny)
+    pressure = fields["F4"].reshape(nx, ny)
+    r_xx = fields["F5"].reshape(nx, ny) - u * u
+    r_yy = fields["F6"].reshape(nx, ny) - v * v
+    r_xy = fields["F9"].reshape(nx, ny) - u * v
+
+    # A constant pressure makes no contribution around a closed rectangle.
+    # Removing the sampled mean first makes that cancellation exact even in
+    # floating point and leaves the momentum-balance result unchanged.
+    pinf = float(np.mean(pressure))
+    pressure = pressure - pinf
+    trapz = getattr(np, "trapezoid", np.trapz)
+
+    def edge_terms(
+        u_edge: np.ndarray,
+        v_edge: np.ndarray,
+        p_edge: np.ndarray,
+        rxx_edge: np.ndarray,
+        ryy_edge: np.ndarray,
+        rxy_edge: np.ndarray,
+        coordinate: np.ndarray,
+        nx_normal: float,
+        ny_normal: float,
+    ) -> Tuple[float, float, float, float, float, float]:
+        un = u_edge * nx_normal + v_edge * ny_normal
+        conv_x = trapz(u_edge * un, coordinate)
+        conv_y = trapz(v_edge * un, coordinate)
+        reynolds_x = trapz(rxx_edge * nx_normal + rxy_edge * ny_normal, coordinate)
+        reynolds_y = trapz(rxy_edge * nx_normal + ryy_edge * ny_normal, coordinate)
+        pressure_x = trapz(p_edge * nx_normal, coordinate)
+        pressure_y = trapz(p_edge * ny_normal, coordinate)
+        return (
+            float(conv_x), float(conv_y), float(reynolds_x), float(reynolds_y),
+            float(pressure_x), float(pressure_y),
+        )
+
+    # The coordinate passed to trapz is deliberately ascending on every side;
+    # the outward normal carries the orientation of the closed boundary.
+    edges = (
+        edge_terms(u[0, :], v[0, :], pressure[0, :], r_xx[0, :], r_yy[0, :], r_xy[0, :], y, -1.0, 0.0),
+        edge_terms(u[-1, :], v[-1, :], pressure[-1, :], r_xx[-1, :], r_yy[-1, :], r_xy[-1, :], y, 1.0, 0.0),
+        edge_terms(u[:, 0], v[:, 0], pressure[:, 0], r_xx[:, 0], r_yy[:, 0], r_xy[:, 0], x, 0.0, -1.0),
+        edge_terms(u[:, -1], v[:, -1], pressure[:, -1], r_xx[:, -1], r_yy[:, -1], r_xy[:, -1], x, 0.0, 1.0),
+    )
+    conv_x, conv_y, reynolds_x, reynolds_y, pressure_x, pressure_y = (
+        float(sum(side[index] for side in edges)) for index in range(6)
+    )
+
+    # Exterior control-volume momentum balance.  With n outward from the
+    # fluid volume, every outer-boundary flux has the opposite sign to the
+    # load on the airfoil.  This gives the same force direction as the
+    # existing wall-surface integration.
+    balance_x = -conv_x - reynolds_x - pressure_x
+    balance_y = -conv_y - reynolds_y - pressure_y
+    force_x = balance_x
+    force_y = balance_y
+
+    ca, sa = math.cos(math.radians(aoa_deg)), math.sin(math.radians(aoa_deg))
+
+    def project(x_force: float, y_force: float) -> Tuple[float, float]:
+        return (
+            2.0 * (y_force * ca - x_force * sa),
+            2.0 * (y_force * sa + x_force * ca),
+        )
+
+    # The three airfoil-force pieces are the negative exterior fluxes.
+    cl_conv, cd_conv = project(-conv_x, -conv_y)
+    cl_reynolds, cd_reynolds = project(-reynolds_x, -reynolds_y)
+    cl_pressure, cd_pressure = project(-pressure_x, -pressure_y)
+    cl, cd = project(force_x, force_y)
+    return ClCdCoefficients(
+        reynolds_number=header.reynolds_number,
+        aoa_deg=aoa_deg,
+        pinf=pinf,
+        cl=float(cl),
+        cd=float(cd),
+        cd_p=math.nan,
+        cd_f=math.nan,
+        l_over_d=float(cl / cd) if cd != 0 else math.nan,
+        method="control_volume",
+        fx=float(force_x),
+        fy=float(force_y),
+        fx_balance=float(balance_x),
+        fy_balance=float(balance_y),
+        cl_convective=float(cl_conv),
+        cl_reynolds=float(cl_reynolds),
+        cl_pressure=float(cl_pressure),
+        cd_convective=float(cd_conv),
+        cd_reynolds=float(cd_reynolds),
+        cd_pressure=float(cd_pressure),
+    )
+
+
 def write_manifest(
     manifest_path: Path,
     windows: Sequence[BackwardWindow],
@@ -777,6 +963,7 @@ def write_clcd_tables(
         raise ValueError("block_rows and block_averages must be provided together")
     if block_rows is None:
         mesh_file, aoa_deg = _clcd_mesh_settings(conf, paths)
+        method = _clcd_method(_section(conf, "clcd_backward"))
         block_rows, block_averages = _compute_block_rows(
             windows,
             paths,
@@ -784,6 +971,7 @@ def write_clcd_tables(
             headers,
             mesh_file,
             aoa_deg,
+            method,
         )
     _atomic_write_csv(paths.block_csv, _block_csv_fields(), block_rows)
     backward_rows = _compute_backward_rows(block_averages)
@@ -810,6 +998,7 @@ def _compute_block_rows(
     headers: Mapping[int, IntFldHeader],
     mesh_file: Path,
     aoa_deg: float,
+    method: str = "surface",
 ) -> Tuple[List[Dict[str, Any]], List[_BlockAverage]]:
     rows: List[Dict[str, Any]] = []
     averages: List[_BlockAverage] = []
@@ -818,6 +1007,7 @@ def _compute_block_rows(
         header = headers.get(window.window_index) or validate_int_fld_for_window(
             int_fld_path,
             window,
+            method=method,
         )
         block = _block_average_from_int_fld(
             window,
@@ -826,6 +1016,7 @@ def _compute_block_rows(
             int_fld_path,
             mesh_file,
             aoa_deg,
+            method,
         )
         averages.append(block)
         rows.append(_block_row(block))
@@ -841,7 +1032,10 @@ def _clcd_mesh_settings(
     mesh = clcd_conf.get("mesh") or post_conf.get("mesh")
     if not mesh:
         raise ValueError("clcd_backward.mesh or post.mesh is required")
-    mesh_file = _resolve_path(mesh, paths.root, _repo_root(paths.root))
+    if str(mesh).lower() == "auto":
+        mesh_file = _generated_mesh_file(conf, paths.root)
+    else:
+        mesh_file = _resolve_path(mesh, paths.root, _repo_root(paths.root))
     aoa_deg = float(clcd_conf.get("aoa_deg", post_conf.get("aoa_deg", 5.0)))
     return mesh_file, aoa_deg
 
@@ -853,8 +1047,17 @@ def _block_average_from_int_fld(
     int_fld_path: Path,
     mesh_file: Path,
     aoa_deg: float,
+    method: str = "surface",
 ) -> _BlockAverage:
-    coeffs = compute_clcd_from_int_fld(int_fld_path, mesh_file, aoa_deg=aoa_deg)
+    method = _normalize_clcd_method(method)
+    if method == "control_volume":
+        coeffs = compute_control_volume_clcd_from_int_fld(
+            int_fld_path,
+            mesh_file,
+            aoa_deg=aoa_deg,
+        )
+    else:
+        coeffs = compute_clcd_from_int_fld(int_fld_path, mesh_file, aoa_deg=aoa_deg)
     block = _BlockAverage(
         window=window,
         header=header,
@@ -893,6 +1096,17 @@ def _block_csv_fields() -> Tuple[str, ...]:
         "Cd_p",
         "Cd_f",
         "L_over_D",
+        "method",
+        "Fx",
+        "Fy",
+        "Fx_balance",
+        "Fy_balance",
+        "Cl_convective",
+        "Cl_reynolds",
+        "Cl_pressure",
+        "Cd_convective",
+        "Cd_reynolds",
+        "Cd_pressure",
         "int_fld_path",
     )
 
@@ -919,6 +1133,17 @@ def _backward_csv_fields() -> Tuple[str, ...]:
         "Cd_p",
         "Cd_f",
         "L_over_D",
+        "method",
+        "Fx",
+        "Fy",
+        "Fx_balance",
+        "Fy_balance",
+        "Cl_convective",
+        "Cl_reynolds",
+        "Cl_pressure",
+        "Cd_convective",
+        "Cd_reynolds",
+        "Cd_pressure",
     )
 
 
@@ -949,6 +1174,17 @@ def _block_row(block: _BlockAverage) -> Dict[str, Any]:
         "Cd_p": format(coeffs.cd_p, ".16g"),
         "Cd_f": format(coeffs.cd_f, ".16g"),
         "L_over_D": format(coeffs.l_over_d, ".16g"),
+        "method": coeffs.method,
+        "Fx": format(coeffs.fx, ".16g"),
+        "Fy": format(coeffs.fy, ".16g"),
+        "Fx_balance": format(coeffs.fx_balance, ".16g"),
+        "Fy_balance": format(coeffs.fy_balance, ".16g"),
+        "Cl_convective": format(coeffs.cl_convective, ".16g"),
+        "Cl_reynolds": format(coeffs.cl_reynolds, ".16g"),
+        "Cl_pressure": format(coeffs.cl_pressure, ".16g"),
+        "Cd_convective": format(coeffs.cd_convective, ".16g"),
+        "Cd_reynolds": format(coeffs.cd_reynolds, ".16g"),
+        "Cd_pressure": format(coeffs.cd_pressure, ".16g"),
         "int_fld_path": str(block.int_fld_path.resolve()),
     }
 
@@ -996,6 +1232,17 @@ def _backward_row(backward_index: int, blocks: Sequence[_BlockAverage]) -> Dict[
         "Cd_p": format(avg("cd_p"), ".16g"),
         "Cd_f": format(avg("cd_f"), ".16g"),
         "L_over_D": format(cl / cd, ".16g"),
+        "method": blocks[-1].coeffs.method,
+        "Fx": format(avg("fx"), ".16g"),
+        "Fy": format(avg("fy"), ".16g"),
+        "Fx_balance": format(avg("fx_balance"), ".16g"),
+        "Fy_balance": format(avg("fy_balance"), ".16g"),
+        "Cl_convective": format(avg("cl_convective"), ".16g"),
+        "Cl_reynolds": format(avg("cl_reynolds"), ".16g"),
+        "Cl_pressure": format(avg("cl_pressure"), ".16g"),
+        "Cd_convective": format(avg("cd_convective"), ".16g"),
+        "Cd_reynolds": format(avg("cd_reynolds"), ".16g"),
+        "Cd_pressure": format(avg("cd_pressure"), ".16g"),
     }
 
 
@@ -1120,6 +1367,32 @@ def _block_size_from_config(clcd_conf: Mapping[str, Any]) -> int:
     return 1
 
 
+def _clcd_method(clcd_conf: Mapping[str, Any]) -> str:
+    """Read and normalize the Cl/Cd force-evaluation method from YAML."""
+
+    return _normalize_clcd_method(clcd_conf.get("method", "surface"))
+
+
+def _normalize_clcd_method(value: Any) -> str:
+    method = str(value).strip().lower().replace("-", "_")
+    aliases = {
+        "surface": "surface",
+        "surface_integral": "surface",
+        "wall": "surface",
+        "control_volume": "control_volume",
+        "controlvolume": "control_volume",
+        "cv": "control_volume",
+        "momentum_balance": "control_volume",
+        "momentum": "control_volume",
+    }
+    try:
+        return aliases[method]
+    except KeyError as exc:
+        raise ValueError(
+            "clcd_backward.method must be 'surface' or 'control_volume'"
+        ) from exc
+
+
 def _window_start_time(stat: StsFile, nek_conf: Mapping[str, Any]) -> float:
     raw = nek_conf.get("sampling_start_time", "auto")
     if raw not in (None, "", "auto"):
@@ -1158,20 +1431,47 @@ def _read_minimal_fields(path: Path, mesh: Mapping[str, Any]) -> Tuple[Dict[str,
         header.nstat + 3: "D3",
         header.nstat + 4: "D4",
     }
+    raw_fields, header = _read_selected_fields(path, npoints_total, wanted_positions)
+    fields = {
+        name: raw.reshape(two_np, ln).T
+        for name, raw in raw_fields.items()
+    }
+    return fields, header
+
+
+def _read_selected_fields(
+    path: Path,
+    npoints: int,
+    wanted_positions: Mapping[int, str],
+) -> Tuple[Dict[str, np.ndarray], IntFldHeader]:
+    """Read selected Fortran records without assuming a profile-mesh layout."""
+
+    header = parse_int_fld_header(path)
+    if header.npoints != npoints:
+        raise ValueError(
+            f"{path}: int_fld has {header.npoints} points, but mesh has {npoints}"
+        )
+    if not wanted_positions:
+        return {}, header
+    last_position = header.nstat + header.nderiv
+    invalid = sorted(position for position in wanted_positions if position < 1 or position > last_position)
+    if invalid:
+        labels = ", ".join(str(position) for position in invalid)
+        raise ValueError(f"{path}: requested field record(s) {labels} are unavailable")
     fields: Dict[str, np.ndarray] = {}
     with path.open("rb") as handle:
         read_header(handle)
-        for position in range(1, header.nstat + header.nderiv + 1):
+        for position in range(1, last_position + 1):
             if position != 1:
                 handle.seek(8, os.SEEK_CUR)
             name = wanted_positions.get(position)
             if name:
-                raw = np.fromfile(handle, np.float64, npoints_total)
-                if raw.size != npoints_total:
+                raw = np.fromfile(handle, np.float64, npoints)
+                if raw.size != npoints:
                     raise ValueError(f"{path}: truncated field record {name}")
-                fields[name] = raw.reshape(two_np, ln).T
+                fields[name] = raw
             else:
-                handle.seek(npoints_total * 8, os.SEEK_CUR)
+                handle.seek(npoints * 8, os.SEEK_CUR)
     missing = sorted(set(wanted_positions.values()) - set(fields))
     if missing:
         raise ValueError(f"{path}: missing required field record(s): {', '.join(missing)}")

@@ -286,7 +286,8 @@ def main(argv=None):
 
     sc = sub.add_parser(
         "clcd-backward",
-        help="run blockwise Cl/Cd windows and write Python-only backward convergence CSVs",
+        aliases=["backward-clcd"],
+        help="run blockwise surface or control-volume Cl/Cd windows and write backward CSVs",
     )
     sc.add_argument("config", help="YAML run configuration with clcd_backward section")
     sc.add_argument("--build", action="store_true", default=None,
